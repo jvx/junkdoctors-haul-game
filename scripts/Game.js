@@ -12,6 +12,7 @@ class Game {
         this.currentLevel = 1;
         this.urlLevelOverride = this.getUrlLevelOverride();
         this.urlPhysicsEnabled = this.getUrlPhysicsEnabled();
+        this.urlPickupAtTruck = this.getUrlPickupAtTruck();
         this.isUrlLevelOverrideActive = false;
         
         this.score = {
@@ -234,6 +235,9 @@ class Game {
                 if (this.urlPhysicsEnabled) {
                     console.log('🔧 URL physics override: ENABLED (Havok)');
                 }
+                if (this.urlPickupAtTruck) {
+                    console.log('🧪 URL pickup override: spawning pickup items beside the truck');
+                }
                 if (this.urlLevelOverride) {
                     this.isUrlLevelOverrideActive = true;
                     console.log(`🧪 URL level override: starting level ${this.urlLevelOverride}`);
@@ -274,6 +278,18 @@ class Game {
 
         if (['0', 'false', 'off', 'no'].includes(normalized)) return false;
         return ['1', 'true', 'on', 'yes', 'havok'].includes(normalized);
+    }
+
+    getUrlPickupAtTruck() {
+        const params = new URLSearchParams(window.location.search);
+        const keys = ['pickup', 'pickupItems', 'items'];
+        const key = keys.find((paramKey) => params.has(paramKey));
+        if (!key) return false;
+
+        const normalized = (params.get(key) || 'truck').trim().toLowerCase();
+        if (['0', 'false', 'off', 'no', 'pickup'].includes(normalized)) return false;
+
+        return ['1', 'true', 'on', 'yes', 'truck', 'near', 'nearby', 'near-truck'].includes(normalized);
     }
 
     initPerfOverlay() {
@@ -665,11 +681,39 @@ class Game {
     // Spawn items on the ground at pickup location (call after loadLevel)
     spawnGroundItems() {
         // Use the driveway spawn position if available, otherwise use pickup center
-        const spawnPos = this.sceneManager.pickupItemSpawn || this.pickup;
+        const spawnPos = this.urlPickupAtTruck
+            ? this.getPickupItemsTruckSpawn()
+            : (this.sceneManager.pickupItemSpawn || this.pickup);
         this.itemManager.spawnItemsAtPickup(spawnPos.x, spawnPos.z);
+
+        if (this.urlPickupAtTruck) {
+            this.isAtPickup = true;
+            this.uiManager.setPickupMode(true, this.itemManager.areAllItemsPlaced());
+        }
+    }
+
+    getPickupItemsTruckSpawn() {
+        if (!this.truck || !this.truck.root) {
+            return { x: 0, z: 0 };
+        }
+
+        this.truck.root.computeWorldMatrix(true);
+        const sideOffset = (this.truck.cargoWidth || 2.4) / 2 + 4.5;
+        const localSpawn = new BABYLON.Vector3(-sideOffset, 0, 0.6);
+        const worldSpawn = BABYLON.Vector3.TransformCoordinates(localSpawn, this.truck.root.getWorldMatrix());
+        return { x: worldSpawn.x, z: worldSpawn.z };
     }
     
     checkPickupProximity() {
+        if (this.urlPickupAtTruck) {
+            const wasAtPickup = this.isAtPickup;
+            this.isAtPickup = true;
+            if (wasAtPickup !== this.isAtPickup) {
+                this.uiManager.setPickupMode(true, this.itemManager.areAllItemsPlaced());
+            }
+            return;
+        }
+
         const dx = this.pickup.x - this.truck.position.x;
         const dz = this.pickup.z - this.truck.position.z;
         const distance = Math.sqrt(dx * dx + dz * dz);
