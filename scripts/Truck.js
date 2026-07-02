@@ -1876,8 +1876,8 @@ class Truck {
             }
             body.setLinearVelocity(bedVelocity);
             if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
-            if (body.setLinearDamping) body.setLinearDamping(item.baseLinearDamping || 0.45);
-            if (body.setAngularDamping) body.setAngularDamping(Math.max(item.baseAngularDamping || 0.8, 1.2));
+            if (body.setLinearDamping) body.setLinearDamping(item.baseLinearDamping || 0.65);
+            if (body.setAngularDamping) body.setAngularDamping(Math.max(item.baseAngularDamping || 1.15, 1.35));
             item._staticFrictionHeld = true;
             return true;
         }
@@ -2101,8 +2101,8 @@ class Truck {
                     body.setLinearVelocity(releaseVelocity);
                     body.setAngularVelocity(BABYLON.Vector3.Zero());
 
-                    body.setLinearDamping(item.baseLinearDamping || 0.35);
-                    body.setAngularDamping(item.baseAngularDamping || 0.45);
+                    body.setLinearDamping(item.baseLinearDamping || 0.65);
+                    body.setAngularDamping(item.baseAngularDamping || 1.15);
 
                     item.localX = item.settleLocalX ?? item.localX;
                     item.localY = item.settleLocalY ?? item.localY;
@@ -2224,11 +2224,19 @@ class Truck {
                             localZ <= this.cargoLength / 2 + halfZ;
 
                         if (overCargoFootprint) {
-                            const maxUpVelocity = 1.2;
+                            const maxUpVelocity = 0.5;
                             const cargoSoftCeilingY = this.floorTopY + this.cargoHeight + halfY;
+                            const restingCenterY = this.floorTopY + halfY;
+                            const nearBedSurface = localY <= restingCenterY + 0.18;
                             let guardedVel = null;
 
-                            if (vel.y > maxUpVelocity) {
+                            if (nearBedSurface && vel.y > 0.08) {
+                                guardedVel = new BABYLON.Vector3(
+                                    vel.x,
+                                    Math.min(vel.y * 0.3, 0.22),
+                                    vel.z
+                                );
+                            } else if (vel.y > maxUpVelocity) {
                                 guardedVel = new BABYLON.Vector3(vel.x, maxUpVelocity, vel.z);
                             }
 
@@ -2405,6 +2413,10 @@ class Truck {
                 Math.abs(localX) <= this.cargoWidth / 2 + halfX * 0.5 &&
                 localZ >= -this.cargoLength / 2 - halfZ * 0.5 &&
                 localZ <= this.cargoLength / 2 + halfZ * 0.5;
+            const overCargoFootprint =
+                Math.abs(localX) <= this.cargoWidth / 2 + halfX &&
+                localZ >= -this.cargoLength / 2 - halfZ &&
+                localZ <= this.cargoLength / 2 + halfZ;
 
             const itemBottomY = item.mesh.position.y - halfY;
             const floorPenetration = this.floorTopY - itemBottomY;
@@ -2429,6 +2441,41 @@ class Truck {
                     `bottom=${itemBottomY.toFixed(2)} < floor=${this.floorTopY.toFixed(2)}`,
                     `moving y to ${correctedY.toFixed(2)}`
                 );
+            }
+
+            if (body && overCargoFootprint && body.getLinearVelocity && body.setLinearVelocity) {
+                const vel = body.getLinearVelocity();
+                if (vel) {
+                    const restingCenterY = this.floorTopY + halfY;
+                    const nearBedSurface = localY <= restingCenterY + 0.18;
+                    let guardedY = null;
+
+                    if (nearBedSurface && vel.y > 0.08) {
+                        guardedY = Math.min(vel.y * 0.3, 0.22);
+                    } else if (vel.y > 0.5) {
+                        guardedY = 0.5;
+                    }
+
+                    if (guardedY !== null) {
+                        body.setLinearVelocity(new BABYLON.Vector3(vel.x, guardedY, vel.z));
+                    }
+                }
+            }
+
+            if (body && overCargoFootprint && body.getAngularVelocity && body.setAngularVelocity) {
+                const angVel = body.getAngularVelocity();
+                if (angVel) {
+                    const angSpeed = Math.sqrt(angVel.x * angVel.x + angVel.y * angVel.y + angVel.z * angVel.z);
+                    const angularLimit = 7.0;
+                    if (angSpeed > angularLimit) {
+                        const scale = angularLimit / angSpeed;
+                        body.setAngularVelocity(new BABYLON.Vector3(
+                            angVel.x * scale,
+                            angVel.y * scale,
+                            angVel.z * scale
+                        ));
+                    }
+                }
             }
 
             if (item.isParented && item.mesh.parent === this.root) {
