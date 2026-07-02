@@ -1708,8 +1708,7 @@ class Truck {
                 item.mesh.rotation.z
             );
         const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
-        const truckQuatInv = truckQuat.clone();
-        truckQuatInv.invert();
+        const truckQuatInv = BABYLON.Quaternion.Inverse(truckQuat);
         item.localQuat = truckQuatInv.multiply(meshQuat);
 
         this.loadedItems.push(item);
@@ -1840,8 +1839,7 @@ class Truck {
                         item.mesh.rotation.z
                     );
                 const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
-                const truckQuatInv = truckQuat.clone();
-                truckQuatInv.invert();
+                const truckQuatInv = BABYLON.Quaternion.Inverse(truckQuat);
                 item._staticFrictionLocalQuat = truckQuatInv.multiply(worldQuat);
 
                 if (body.setMotionType) {
