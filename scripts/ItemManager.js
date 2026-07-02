@@ -118,12 +118,12 @@ class ItemManager {
             const shouldLowerCom = itemDef.type !== 'box' && tallRatio > 1.15;
             const inertia = massProps.inertia || BABYLON.Vector3.Zero();
             const isFurniture = itemDef.type !== 'box';
-            const inertiaScale = isFurniture ? (shouldLowerCom ? 8.0 : 4.0) : 1.0;
+            const inertiaScale = isFurniture ? (shouldLowerCom ? 6.5 : 2.8) : 1.0;
 
             body.setMassProperties({
                 mass,
                 centerOfMass: shouldLowerCom
-                    ? new BABYLON.Vector3(0, -Math.min(boxSize.y * 0.28, 0.3), 0)
+                    ? new BABYLON.Vector3(0, -Math.min(boxSize.y * 0.23, 0.24), 0)
                     : (massProps.centerOfMass || BABYLON.Vector3.Zero()),
                 inertia: new BABYLON.Vector3(
                     inertia.x * inertiaScale,
@@ -136,8 +136,8 @@ class ItemManager {
 
         body.setLinearVelocity(BABYLON.Vector3.Zero());
         body.setAngularVelocity(BABYLON.Vector3.Zero());
-        body.setLinearDamping(0.9);
-        body.setAngularDamping(1.6);
+        body.setLinearDamping(1.0);
+        body.setAngularDamping(1.35);
 
         if (truckMovingAtPlacement) {
             body.setLinearVelocity(this._getTruckPointVelocity(localX, localZ));
@@ -1025,8 +1025,8 @@ class ItemManager {
         const localY = placeY + physicsLift; // Small lift above floor
         const localRotation = placeRotation - this.truck.rotation;
 
-        const baseLinearDamping = 0.9;
-        const baseAngularDamping = 1.6;
+        const baseLinearDamping = 1.0;
+        const baseAngularDamping = 1.35;
         const truckMovingAtPlacement = this.truck && (
             Math.abs(this.truck.speed || 0) > 0.5 ||
             this.truck.keys?.w ||
@@ -1057,7 +1057,7 @@ class ItemManager {
                 {
                     mass: Math.max(1, itemDef.weight || 10),
                     restitution: 0.0,
-                    friction: itemDef.type === 'box' ? 1.8 : 2.8,
+                    friction: itemDef.type === 'box' ? 2.2 : 3.2,
                     startAsleep: !truckMovingAtPlacement
                 },
                 this.scene

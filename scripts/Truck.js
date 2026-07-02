@@ -1874,8 +1874,8 @@ class Truck {
             }
             body.setLinearVelocity(bedVelocity);
             if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
-            if (body.setLinearDamping) body.setLinearDamping(item.baseLinearDamping || 0.9);
-            if (body.setAngularDamping) body.setAngularDamping(Math.max(item.baseAngularDamping || 1.6, 1.8));
+            if (body.setLinearDamping) body.setLinearDamping(item.baseLinearDamping || 1.0);
+            if (body.setAngularDamping) body.setAngularDamping(Math.max(item.baseAngularDamping || 1.35, 1.5));
             item._staticFrictionHeld = true;
             return true;
         }
@@ -2099,8 +2099,8 @@ class Truck {
                     body.setLinearVelocity(releaseVelocity);
                     body.setAngularVelocity(BABYLON.Vector3.Zero());
 
-                    body.setLinearDamping(item.baseLinearDamping || 0.9);
-                    body.setAngularDamping(item.baseAngularDamping || 1.6);
+                    body.setLinearDamping(item.baseLinearDamping || 1.0);
+                    body.setAngularDamping(item.baseAngularDamping || 1.35);
 
                     item.localX = item.settleLocalX ?? item.localX;
                     item.localY = item.settleLocalY ?? item.localY;
@@ -2240,7 +2240,7 @@ class Truck {
                                 const relZ = vel.z - bedVelocity.z;
                                 const slipSpeed = Math.sqrt(relX * relX + relZ * relZ);
                                 if (slipSpeed > 0.05) {
-                                    const slipRetention = Math.pow(0.5, Math.min(dt, 0.05) / 0.16);
+                                    const slipRetention = Math.pow(0.5, Math.min(dt, 0.05) / 0.045);
                                     guardedVel = new BABYLON.Vector3(
                                         bedVelocity.x + relX * slipRetention,
                                         vel.y,
@@ -2493,7 +2493,7 @@ class Truck {
                 const angVel = body.getAngularVelocity();
                 if (angVel) {
                     const angSpeed = Math.sqrt(angVel.x * angVel.x + angVel.y * angVel.y + angVel.z * angVel.z);
-                    const angularLimit = 4.5;
+                    const angularLimit = 5.2;
                     if (angSpeed > angularLimit) {
                         const scale = angularLimit / angSpeed;
                         body.setAngularVelocity(new BABYLON.Vector3(
@@ -2788,7 +2788,7 @@ class Truck {
             // Create moving truck bodies. Contact friction now handles cargo
             // motion; cargo is not pinned or orientation-locked in physics mode.
             const physicsParts = [
-                { mesh: this.truckFloorMesh, friction: 2.4, restitution: 0.0 },
+                { mesh: this.truckFloorMesh, friction: 3.4, restitution: 0.0 },
                 { mesh: this.truckLeftWallMesh, friction: 0.02, restitution: 0.0 },
                 { mesh: this.truckRightWallMesh, friction: 0.02, restitution: 0.0 },
                 { mesh: this.truckFrontWallMesh, friction: 0.02, restitution: 0.0 },
