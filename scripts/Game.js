@@ -11,6 +11,7 @@ class Game {
         this.isPaused = false;
         this.currentLevel = 1;
         this.urlLevelOverride = this.getUrlLevelOverride();
+        this.urlPhysicsEnabled = this.getUrlPhysicsEnabled();
         this.isUrlLevelOverrideActive = false;
         
         this.score = {
@@ -29,7 +30,7 @@ class Game {
         this.isAtPickup = true; // Start at pickup location
         
         // Physics mode: when true, items use Havok physics; when false, items are parented to truck
-        this.physicsEnabled = false;
+        this.physicsEnabled = this.urlPhysicsEnabled;
 
         // Systems
         this.audioManager = new AudioManager();
@@ -230,6 +231,9 @@ class Game {
             
             setTimeout(() => {
                 this.uiManager.hideLoadingScreen();
+                if (this.urlPhysicsEnabled) {
+                    console.log('🔧 URL physics override: ENABLED (Havok)');
+                }
                 if (this.urlLevelOverride) {
                     this.isUrlLevelOverrideActive = true;
                     console.log(`🧪 URL level override: starting level ${this.urlLevelOverride}`);
@@ -258,6 +262,18 @@ class Game {
         if (!Number.isSafeInteger(level) || level < 1) return null;
 
         return Math.min(level, 99);
+    }
+
+    getUrlPhysicsEnabled() {
+        const params = new URLSearchParams(window.location.search);
+        const hasPhysicsParam = params.has('physics') || params.has('phys');
+        if (!hasPhysicsParam) return false;
+
+        const rawValue = params.has('physics') ? params.get('physics') : params.get('phys');
+        const normalized = (rawValue || '1').trim().toLowerCase();
+
+        if (['0', 'false', 'off', 'no'].includes(normalized)) return false;
+        return ['1', 'true', 'on', 'yes', 'havok'].includes(normalized);
     }
 
     initPerfOverlay() {
