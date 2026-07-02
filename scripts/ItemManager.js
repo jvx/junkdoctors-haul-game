@@ -136,8 +136,8 @@ class ItemManager {
 
         body.setLinearVelocity(BABYLON.Vector3.Zero());
         body.setAngularVelocity(BABYLON.Vector3.Zero());
-        body.setLinearDamping(0.65);
-        body.setAngularDamping(1.15);
+        body.setLinearDamping(0.9);
+        body.setAngularDamping(1.6);
 
         if (truckMovingAtPlacement) {
             body.setLinearVelocity(this._getTruckPointVelocity(localX, localZ));
@@ -1025,8 +1025,8 @@ class ItemManager {
         const localY = placeY + physicsLift; // Small lift above floor
         const localRotation = placeRotation - this.truck.rotation;
 
-        const baseLinearDamping = 0.65;
-        const baseAngularDamping = 1.15;
+        const baseLinearDamping = 0.9;
+        const baseAngularDamping = 1.6;
         const truckMovingAtPlacement = this.truck && (
             Math.abs(this.truck.speed || 0) > 0.5 ||
             this.truck.keys?.w ||
@@ -1057,7 +1057,7 @@ class ItemManager {
                 {
                     mass: Math.max(1, itemDef.weight || 10),
                     restitution: 0.0,
-                    friction: itemDef.type === 'box' ? 1.0 : 1.4,
+                    friction: itemDef.type === 'box' ? 1.8 : 2.8,
                     startAsleep: !truckMovingAtPlacement
                 },
                 this.scene
