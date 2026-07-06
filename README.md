@@ -6,12 +6,26 @@ Play the live game: https://jayremedy.github.io/junkdoctors-haul-game/
 
 ## Testing Shortcuts
 
-URL params can be combined for faster playtesting:
-- `?lvl=2` starts a specific level.
-- `?physics=1` starts with physics mode on.
-- `?pickup=truck` spawns pickup items beside the truck and enables pickup mode.
+Run the game locally as a static site:
 
-Example: https://jayremedy.github.io/junkdoctors-haul-game/?lvl=2&physics=1&pickup=truck
+```bash
+python3 -m http.server 8000
+```
+
+Then open `http://localhost:8000/`.
+
+URL params can be combined for faster playtesting:
+
+- `?lvl=2` starts a specific level automatically. Valid levels start at `1`; values above `99` are clamped to `99`. Level-started test sessions skip leaderboard score submission.
+- `?physics=1` starts with Havok physics mode on. Accepted on values: `1`, `true`, `on`, `yes`, `havok`. Alias: `phys`.
+- `?physics=0` explicitly keeps physics mode off. Accepted off values: `0`, `false`, `off`, `no`.
+- `?pickup=truck` spawns pickup items beside the truck and keeps pickup mode active so you can test loading without driving to the pickup marker. Aliases: `pickupItems` or `items`; accepted on values include `1`, `true`, `on`, `yes`, `truck`, `near`, `nearby`, `near-truck`.
+
+Examples:
+
+- Local level 2 physics-loading test: `http://localhost:8000/?lvl=2&physics=1&pickup=truck`
+- Live level 2 physics-loading test: https://jayremedy.github.io/junkdoctors-haul-game/?lvl=2&physics=1&pickup=truck
+- Start screen with physics pre-enabled: `http://localhost:8000/?physics=1`
 
 ## Overview
 
