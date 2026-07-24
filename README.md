@@ -2,7 +2,7 @@
 
 A 3D truck loading puzzle game built with Babylon.js for JunkDoctors.
 
-Play the live game: https://jayremedy.github.io/junkdoctors-haul-game/
+Play the live game: https://jvx.github.io/junkdoctors-haul-game/
 
 ## Testing Shortcuts
 
