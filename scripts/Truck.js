@@ -40,6 +40,25 @@ class Truck {
         this.gearSpeeds = [0, 25, 50, 75, 95, 110]; // Speed thresholds for upshifting
         this.gearDownSpeeds = [0, 20, 45, 70, 90, 105]; // Slightly lower for downshifting (hysteresis)
         this.gearAcceleration = [12, 12, 8, 5, 3, 1.5]; // Heavy dump truck = very sluggish
+
+        // Payload physics: cargo weight reduces acceleration and lengthens braking (F = ma)
+        this.truckBaseMass = 800; // Effective unladen mass in item-weight units (tuned for feel)
+        this.payloadWeight = 0;   // Sum of loaded (non-fallen) item weights
+        this.loadAccelFactor = 1; // truckBaseMass / (truckBaseMass + payload), clamped
+
+        // Suspension weight transfer: spring-damped body lean (radians).
+        // Applied to root.rotation.x/z and to the animated cargo bed physics
+        // bodies, so cargo physically feels the bed tilt under braking/turning.
+        this.suspensionPitch = 0;    // rotation.x: negative = nose (-Z) dips, e.g. braking from forward
+        this.suspensionRoll = 0;     // rotation.z: body rolls away from the turn center
+        this.suspensionPitchVel = 0;
+        this.suspensionRollVel = 0;
+        this.suspensionStiffness = 60;     // Spring rate (1/s^2), ~0.9 damping ratio with damping below
+        this.suspensionDamping = 14;       // Damper rate (1/s)
+        this.suspensionPitchGain = 0.0022; // rad per m/s^2 of longitudinal acceleration
+        this.suspensionRollGain = 0.0016;  // rad per m/s^2 of lateral acceleration
+        this.suspensionMaxPitch = 0.025;   // ~1.4 deg cap
+        this.suspensionMaxRoll = 0.03;     // ~1.7 deg cap
         
         // Input state
         this.keys = { w: false, a: false, s: false, d: false, space: false };
@@ -1264,12 +1283,18 @@ class Truck {
         // Acceleration / Deceleration (Space = brake, W = forward, S = backward)
         const effectiveKeys = inputEnabled ? this.keys : { w: false, a: false, s: false, d: false, space: false };
         
+        // Payload physics: heavier cargo means slower acceleration and longer
+        // braking distances. Brakes are less affected than engine power.
+        this.payloadWeight = this.getPayloadWeight();
+        this.loadAccelFactor = Math.max(0.5, this.truckBaseMass / (this.truckBaseMass + this.payloadWeight));
+        const loadedBrakeDecel = this.brakeDeceleration * (0.55 + 0.45 * this.loadAccelFactor);
+
         // Get gear-based acceleration (slower in higher gears)
-        const gearAccel = this.gearAcceleration[Math.max(0, this.currentGear)] || this.baseAcceleration;
-        
+        const gearAccel = (this.gearAcceleration[Math.max(0, this.currentGear)] || this.baseAcceleration) * this.loadAccelFactor;
+
         if (effectiveKeys.space || autoBraking) {
             // Spacebar = brake only (no reverse), override W/S
-            const brakeDecel = this.brakeDeceleration;
+            const brakeDecel = loadedBrakeDecel;
             if (this.speed > 0) {
                 this.speed = Math.max(0, this.speed - brakeDecel * dt);
             } else if (this.speed < 0) {
@@ -1278,14 +1303,14 @@ class Truck {
         } else if (effectiveKeys.w) {
             // If moving backward, brake harder first
             if (this.speed > 0) {
-                this.speed = Math.max(0, this.speed - this.brakeDeceleration * dt);
+                this.speed = Math.max(0, this.speed - loadedBrakeDecel * dt);
             } else {
                 this.speed -= gearAccel * dt; // Negative Z is forward (toward cab)
             }
         } else if (effectiveKeys.s) {
             // If moving forward, brake harder first
             if (this.speed < 0) {
-                this.speed = Math.min(0, this.speed + this.brakeDeceleration * dt);
+                this.speed = Math.min(0, this.speed + loadedBrakeDecel * dt);
             } else {
                 this.speed += gearAccel * dt;
             }
@@ -1337,8 +1362,10 @@ class Truck {
             
             // Turn rate scales with speed - can't turn faster than you're moving
             // At 5 mph: 25% turn rate, at 20+ mph: full turn rate
+            // A heavy payload also makes steering slightly more sluggish.
             const speedTurnScale = Math.min(1, absSpeed / 20);
-            const effectiveTurnSpeed = this.turnSpeed * speedTurnScale;
+            const loadTurnScale = 0.82 + 0.18 * this.loadAccelFactor;
+            const effectiveTurnSpeed = this.turnSpeed * speedTurnScale * loadTurnScale;
             
             // Scale pivot effect by speed - at low speeds, rotate more from center
             // At higher speeds, use full rear axle pivot for realistic steering
@@ -1463,6 +1490,10 @@ class Truck {
             this.speed *= 0.5; // Reduce speed on impact
         }
         
+        // Suspension weight transfer: lean the body from the acceleration
+        // forces computed above (needs currentAcceleration and turnRate)
+        this.updateSuspension(dt);
+
         // Apply to all meshes
         this.applyTransform();
         
@@ -1515,7 +1546,7 @@ class Truck {
         
         this.root.position.x = this.position.x;
         this.root.position.z = this.position.z;
-        this.root.rotation.y = this.rotation;
+        this.syncRootRotation();
         this.root.computeWorldMatrix(true);
         const invMatrix = this.root.getWorldMatrix().clone();
         invMatrix.invert();
@@ -1689,7 +1720,7 @@ class Truck {
         // Legacy path for non-parented items (shouldn't happen anymore)
         this.root.position.x = this.position.x;
         this.root.position.z = this.position.z;
-        this.root.rotation.y = this.rotation;
+        this.syncRootRotation();
         this.root.computeWorldMatrix(true);
 
         const invMatrix = this.root.getWorldMatrix().clone();
@@ -1707,7 +1738,7 @@ class Truck {
                 item.mesh.rotation.x,
                 item.mesh.rotation.z
             );
-        const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
+        const truckQuat = this.getTruckBodyQuaternion();
         const truckQuatInv = BABYLON.Quaternion.Inverse(truckQuat);
         item.localQuat = truckQuatInv.multiply(meshQuat);
 
@@ -1757,7 +1788,7 @@ class Truck {
             worldMatrix
         );
 
-        const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
+        const truckQuat = this.getTruckBodyQuaternion();
         const localQuat = item.localQuat
             ? item.localQuat
             : BABYLON.Quaternion.RotationYawPitchRoll(item.localRotation || 0, 0, 0);
@@ -1838,7 +1869,7 @@ class Truck {
                         item.mesh.rotation.x,
                         item.mesh.rotation.z
                     );
-                const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
+                const truckQuat = this.getTruckBodyQuaternion();
                 const truckQuatInv = BABYLON.Quaternion.Inverse(truckQuat);
                 item._staticFrictionLocalQuat = truckQuatInv.multiply(worldQuat);
 
@@ -1856,7 +1887,7 @@ class Truck {
                 item._staticFrictionLocalZ ?? localZ
             );
             const targetWorld = BABYLON.Vector3.TransformCoordinates(targetLocal, this.root.getWorldMatrix());
-            const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
+            const truckQuat = this.getTruckBodyQuaternion();
             const targetQuat = truckQuat.multiply(
                 item._staticFrictionLocalQuat || item.localQuat || BABYLON.Quaternion.Identity()
             );
@@ -1909,7 +1940,7 @@ class Truck {
         // (applyTransform happens AFTER this function, so root may be stale)
         this.root.position.x = this.position.x;
         this.root.position.z = this.position.z;
-        this.root.rotation.y = this.rotation;
+        this.syncRootRotation();
 
         // Use Babylon's matrices for coordinate transforms (guaranteed correct)
         this.root.computeWorldMatrix(true);
@@ -2143,7 +2174,7 @@ class Truck {
 
                     // Also update rotation using localQuat (stored in addLoadedItem)
                     if (item.localQuat) {
-                        const truckQuat = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, 0, 0);
+                        const truckQuat = this.getTruckBodyQuaternion();
                         const worldQuat = truckQuat.multiply(item.localQuat);
                         if (!item.mesh.rotationQuaternion) {
                             item.mesh.rotationQuaternion = worldQuat;
@@ -2382,7 +2413,7 @@ class Truck {
 
         this.root.position.x = this.position.x;
         this.root.position.z = this.position.z;
-        this.root.rotation.y = this.rotation;
+        this.syncRootRotation();
         this.root.computeWorldMatrix(true);
         const worldMatrix = this.root.getWorldMatrix();
         const invMatrix = worldMatrix.clone();
@@ -2578,12 +2609,59 @@ class Truck {
         });
     }
     
+    getPayloadWeight() {
+        let total = 0;
+        for (let i = 0; i < this.loadedItems.length; i++) {
+            const item = this.loadedItems[i];
+            if (!item.isFallen) total += item.weight || 0;
+        }
+        return total;
+    }
+
+    updateSuspension(dt) {
+        // Weight transfer: nose dips under braking, tail squats under throttle,
+        // and the body rolls away from the turn center. Heavier payloads lean
+        // more. The lean is spring-damped so it eases in and settles smoothly.
+        const sdt = Math.min(dt, 0.05);
+        const loadLean = 1 + Math.min(1, this.payloadWeight / this.truckBaseMass) * 0.8;
+        // currentAcceleration is in mph/s; braking from forward motion is positive
+        const longAccel = (this.currentAcceleration || 0) * 0.44704;
+        // Lateral (centripetal) acceleration along local +X is v * omega
+        const latAccel = (this.speed || 0) * 0.44704 * (this.turnRate || 0);
+
+        const targetPitch = Math.max(-this.suspensionMaxPitch, Math.min(this.suspensionMaxPitch,
+            -this.suspensionPitchGain * loadLean * longAccel));
+        const targetRoll = Math.max(-this.suspensionMaxRoll, Math.min(this.suspensionMaxRoll,
+            this.suspensionRollGain * loadLean * latAccel));
+
+        this.suspensionPitchVel += (this.suspensionStiffness * (targetPitch - this.suspensionPitch) - this.suspensionDamping * this.suspensionPitchVel) * sdt;
+        this.suspensionPitch += this.suspensionPitchVel * sdt;
+        this.suspensionRollVel += (this.suspensionStiffness * (targetRoll - this.suspensionRoll) - this.suspensionDamping * this.suspensionRollVel) * sdt;
+        this.suspensionRoll += this.suspensionRollVel * sdt;
+    }
+
+    syncRootRotation() {
+        // Root carries yaw plus the suspension lean. Every consumer of
+        // bed-local coordinates goes through the root world matrix, so the
+        // lean stays consistent between visuals, physics, and cargo math.
+        this.root.rotation.y = this.rotation;
+        this.root.rotation.x = this.suspensionPitch;
+        this.root.rotation.z = this.suspensionRoll;
+    }
+
+    getTruckBodyQuaternion() {
+        // Full body orientation (yaw + suspension lean) matching root.rotation
+        // in Babylon's YXZ Euler order. Cargo pose math must use this instead
+        // of a yaw-only quaternion so positions and orientations agree.
+        return BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, this.suspensionPitch, this.suspensionRoll);
+    }
+
     applyTransform() {
         // Update the root node - all meshes are parented so they move together
         this.root.position.x = this.position.x;
         this.root.position.z = this.position.z;
-        this.root.rotation.y = this.rotation;
-        
+        this.syncRootRotation();
+
         // Sync physics bodies with mesh positions (for kinematic/static bodies)
         this.syncPhysicsBodies();
         
@@ -2597,6 +2675,8 @@ class Truck {
         this.root.position.x = this.renderPosition.x;
         this.root.position.z = this.renderPosition.z;
         this.root.rotation.y = this.renderRotation ?? this.rotation;
+        this.root.rotation.x = this.suspensionPitch;
+        this.root.rotation.z = this.suspensionRoll;
         this.updateCargoBounds();
     }
 
@@ -2604,7 +2684,7 @@ class Truck {
         // Restore simulation transform without syncing physics (avoids jitter)
         this.root.position.x = this.position.x;
         this.root.position.z = this.position.z;
-        this.root.rotation.y = this.rotation;
+        this.syncRootRotation();
     }
     
     syncPhysicsBodies() {
@@ -2616,12 +2696,13 @@ class Truck {
         const parentNode = this.physicsRoot || this.root;
         parentNode.computeWorldMatrix(true);
         
-        // Cache rotation quaternion - use same rotation as visual truck
-        // Note: Position calc uses -rotation, but quaternion should match visual truck directly
+        // Cache rotation quaternion - use same rotation as visual truck,
+        // including the suspension lean so the animated cargo bed tilts with
+        // the body and cargo physically reacts to weight transfer.
         if (!this._physicsRotQuat) {
             this._physicsRotQuat = BABYLON.Quaternion.Identity();
         }
-        BABYLON.Quaternion.RotationYawPitchRollToRef(this.rotation, 0, 0, this._physicsRotQuat);
+        BABYLON.Quaternion.RotationYawPitchRollToRef(this.rotation, this.suspensionPitch, this.suspensionRoll, this._physicsRotQuat);
         
         // Cache target position vector
         if (!this._physicsTargetPos) {
