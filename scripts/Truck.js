@@ -26,7 +26,7 @@ class Truck {
         this.prevSpeed = 0;
         this.maxSpeed = 65; // Governed road speed in mph
         this.maxReverseSpeed = 12;
-        this.brakeDeceleration = 14; // mph/s, about 0.64 g unloaded
+        this.brakeDeceleration = 40; // mph/s; responsive game controls, not a truck simulator
         this.rearAxleOffset = 1.8;
         this.wheelbase = 4.8;
         this.maxSteerAngle = Math.PI / 6;
@@ -36,11 +36,11 @@ class Truck {
         this.turnRate = 0; // Current turn rate for physics effects
         this.autoBrakeTimer = 0; // Seconds remaining for automatic braking
         
-        // Automatic transmission (dump truck = very slow acceleration)
+        // Automatic transmission with responsive, gear-dependent acceleration.
         this.currentGear = 0; // 0 = Neutral, 1-5 = Forward gears, -1 = Reverse
         this.gearSpeeds = [0, 0, 10, 22, 35, 50];
         this.gearDownSpeeds = [0, 0, 8, 19, 31, 46];
-        this.gearAcceleration = [4.5, 4.5, 3.8, 2.8, 2.4, 2.0]; // mph/s
+        this.gearAcceleration = [12, 12, 10, 8, 6, 4]; // mph/s
 
         // Payload physics: cargo weight reduces acceleration and lengthens braking (F = ma)
         this.truckBaseMass = 3500; // kg, same units as cargo weights
@@ -1298,14 +1298,12 @@ class Truck {
         this.speed = Math.max(-this.maxSpeed, Math.min(this.maxReverseSpeed, nextSpeed / mphToMps)) || 0;
         this.currentAcceleration = (this.speed - this.prevSpeed) / dt;
 
-        // Bicycle steering about the rear axle. Braking consumes tire grip that
-        // would otherwise be available for cornering (a friction circle).
-        const rawSteer = (keys.a ? 1 : 0) - (keys.d ? 1 : 0);
+        // In the left-handed follow camera, negative steering turns screen-left.
+        const rawSteer = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
         this.turnInput += (rawSteer - this.turnInput) * (1 - Math.exp(-6 * dt));
         const travelSpeed = (this.speed + this.prevSpeed) * 0.5 * mphToMps;
-        const tireGrip = 0.7 * 9.81;
-        const longitudinalAccel = Math.min(tireGrip, Math.abs(this.currentAcceleration * mphToMps));
-        const lateralGrip = Math.sqrt(Math.max(0, tireGrip * tireGrip - longitudinalAccel * longitudinalAccel));
+        // Limit high-speed cornering without disabling steering under hard braking.
+        const lateralGrip = 0.7 * 9.81;
         const gripSteerLimit = Math.atan(lateralGrip * this.wheelbase / Math.max(0.01, travelSpeed * travelSpeed));
         this.currentSteerAngle = this.turnInput * Math.min(this.maxSteerAngle, gripSteerLimit);
         this.turnRate = -travelSpeed * Math.tan(this.currentSteerAngle) / this.wheelbase;
