@@ -27,6 +27,36 @@ Examples:
 - Live level 2 physics-loading test: https://jayremedy.github.io/junkdoctors-haul-game/?lvl=2&physics=1&pickup=truck
 - Start screen with physics pre-enabled: `http://localhost:8000/?physics=1`
 
+### Physics Regression Checks
+
+The game has no build step. The optional browser regression suite needs Node.js,
+Python 3, and Playwright with Chromium:
+
+```bash
+npm install --no-save --package-lock=false playwright
+npx playwright install chromium
+python3 -m http.server 8000
+```
+
+In another terminal, from repo root:
+
+```bash
+node tests/physics-browser.mjs
+for f in scripts/*.js; do node --check "$f"; done
+git diff --check
+```
+
+The suite checks parked and moving placement, acceleration/coasting/braking,
+payload effects, steering, collisions, tipping, stacking, pause/restart, physics
+off, delivery completion, and the actual loading/keyboard/mobile UI. It compares
+30/60/144 FPS simulation results and saves metrics/screenshots in `output/physics/`.
+Set `GAME_URL` for another local server and `PLAYWRIGHT_MODULE` when using an
+existing Playwright installation outside the repository.
+
+`?test=1` enables manual `window.advanceTime(ms)` stepping for browser tests;
+`window.render_game_to_text()` reports the current state. Test URLs should also
+include `lvl` to skip the player-profile flow.
+
 ## Overview
 
 Players drive a junk removal truck through a procedurally-generated city, picking up items from locations and delivering them to drop-off points. The goal is to load items efficiently while navigating the streets.
@@ -112,22 +142,28 @@ Manages the entire 3D environment:
 The player-controlled truck with:
 
 **Driving Physics:**
-- Front-wheel steering (pivots around rear axle)
-- Speed-dependent turning (slower turns at low speed)
+- Fixed 120 Hz driving updates synchronized with Havok cargo contacts
+- Front-wheel bicycle steering around the rear axle, limited by tire grip
 - 5-speed automatic transmission
-- Realistic acceleration curves per gear
-- Collision detection with buildings/walls
+- Gear-dependent acceleration, payload mass, rolling resistance, and air drag
+- Braking uses about 0.64 g unloaded; cornering shares the available tire grip
+- Collision detection with buildings/walls and suspension weight transfer
 
 **Cargo System:**
 - Cargo bed bounds tracking
 - Loaded items management
-- Physics-based item settling
+- In physics mode, dynamic Havok bodies handle friction, stacking, sliding,
+  tipping, and impacts without pose locks or per-frame velocity clamps
+- Simplified box collision shapes remain; the truck follows a road-plane
+  vehicle model rather than a full wheel/suspension rigid-body simulation
 
 **Key Constants:**
 ```javascript
-maxSpeed: 110         // Top speed in MPH
-turnSpeed: 1.9        // Turn rate
-rearAxleOffset: 2.5   // Pivot point for steering
+maxSpeed: 65          // Governed road speed in MPH
+maxReverseSpeed: 12   // Reverse limit in MPH
+truckBaseMass: 3500   // Unladen mass in kg
+wheelbase: 4.8        // Meters between axles
+rearAxleOffset: 1.8   // Pivot point for steering
 cargoLength: 4.8m
 cargoWidth: 2.4m
 cargoHeight: 2.2m

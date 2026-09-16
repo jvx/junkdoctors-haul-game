@@ -159,11 +159,8 @@ class Game {
             });
             
             // Start render loop
-            let lastTime = performance.now();
             this.engine.runRenderLoop(() => {
                 const now = performance.now();
-                const deltaTime = (now - lastTime) / 1000;
-                lastTime = now;
                 
                 const perfEnabled = this.enablePerfStats === true;
                 let perfNowMs = 0;
@@ -177,15 +174,11 @@ class Game {
                 }
                 
                 if (this.scene) {
-                    // Update truck driving (always, even when paused for fun)
+                    this.scene.physicsEnabled = this.isRunning && !this.isPaused && !this.uiManager.modalBlocking;
                     if (this.isRunning) {
-                        const inputEnabled = !this.uiManager.modalBlocking;
                         if (!this._loggedRunning) {
                             this._loggedRunning = true;
                         }
-                        const driveStart = perfEnabled ? performance.now() : 0;
-                        this.truck.updateDriving(Math.min(deltaTime, 0.1), { inputEnabled });
-                        if (perfEnabled) this._perfStats.driveMs += performance.now() - driveStart;
 
                         // Update view once per frame
                         const cameraStart = perfEnabled ? performance.now() : 0;
@@ -346,6 +339,15 @@ class Game {
         if (!this.scene || this._physicsPerfObserversInitialized) return;
         this._physicsPerfObserversInitialized = true;
         this.scene.onBeforePhysicsObservable.add(() => {
+            // Advance the kinematic truck once for EACH Havok substep, so cargo
+            // sees a continuous bed velocity at every display frame rate.
+            if (this.truck && this.isRunning && !this.isPaused && !this.uiManager.modalBlocking) {
+                const driveStart = this.enablePerfStats ? performance.now() : 0;
+                this.truck.updateDriving(this.scene.getPhysicsEngine().getSubTimeStep() / 1000);
+                if (this.enablePerfStats && this._perfStats) {
+                    this._perfStats.driveMs += performance.now() - driveStart;
+                }
+            }
             if (!this.enablePerfStats) return;
             this._physicsPerf.start = performance.now();
         });
@@ -375,9 +377,9 @@ class Game {
         this.truck.position.x = 0;
         this.truck.position.z = 0;
         this.truck.rotation = 0;
-        this.truck.speed = 0;
         this.truck.loadedItems = [];
-        this.truck.applyTransform();
+        this.truck.resetMotion();
+        this.isPaused = false;
         
         // Clear any existing items
         this.itemManager.clearAll();
@@ -429,61 +431,8 @@ class Game {
         // Check if arrived at destination
         this.checkDestinationArrival();
         
-        // Check for fallen items using truck-local coordinates (not AABB bounds)
-        const floorY = this.truck.getFloorTopY();
-        const truckX = this.truck.position.x;
-        const truckZ = this.truck.position.z;
-        const truckRot = this.truck.rotation;
-        // IMPORTANT: Negate rotation for Babylon.js convention
-        const cos = Math.cos(-truckRot);
-        const sin = Math.sin(-truckRot);
-        const halfW = this.truck.cargoWidth / 2;
-        const halfL = this.truck.cargoLength / 2;
-
-        // Check each placed item for falling out
-        let newlyFallen = 0;
-        this.itemManager.placedItems.forEach(item => {
-            if (!item.isFallen && item.mesh) {
-                const itemHalfHeight = item.size ? item.size.y / 2 : 0.3;
-
-                // Get local coordinates - depends on whether item is parented
-                let localX, localZ, localY;
-                if (item.isParented && item.mesh.parent === this.truck.root) {
-                    // Item is parented - position IS local coordinates
-                    localX = item.mesh.position.x;
-                    localZ = item.mesh.position.z;
-                    localY = item.mesh.position.y;
-                } else {
-                    // Item is NOT parented - transform world to local
-                    const pos = item.mesh.position;
-                    const dx = pos.x - truckX;
-                    const dz = pos.z - truckZ;
-                    localX = dx * cos + dz * sin;
-                    localZ = -dx * sin + dz * cos;
-                    localY = pos.y;
-                }
-
-                // Item bottom is below truck floor by more than 0.3m = fallen
-                const itemBottomY = localY - itemHalfHeight;
-                const fellBelowFloor = itemBottomY < floorY - 0.3;
-
-                // Check if outside truck cargo area in local coordinates (with margin)
-                const outsideX = Math.abs(localX) > halfW + 0.5;
-                const outsideFront = localZ < -halfL - 0.5;
-                const outsideBack = localZ > halfL + 1.0; // More margin at open back
-                const outsideBounds = outsideX || outsideFront || outsideBack;
-
-                // Mark as fallen if below floor OR outside bounds
-                if (fellBelowFloor || outsideBounds) {
-                    item.isFallen = true;
-                    newlyFallen++;
-                    console.log(`❌ Item ${item.id} marked fallen: localX=${localX.toFixed(2)}, localZ=${localZ.toFixed(2)}, localY=${localY.toFixed(2)}, floorY=${floorY.toFixed(2)}, halfW=${halfW}, halfL=${halfL}, fellBelowFloor=${fellBelowFloor}, outsideBounds=${outsideBounds}`);
-                }
-            }
-        });
-        
-        // Trigger loss if item fell out
-        if (newlyFallen > 0) {
+        // The post-physics pass uses rotated bounds in bed-local coordinates.
+        if (this.itemManager.placedItems.some(item => item.isFallen)) {
             this.onItemFellOut(null);
         }
         
@@ -639,15 +588,12 @@ class Game {
             }
             
             
+            // Give the gentler brakes time to stop before freezing the scene.
+            const brakeRate = this.truck.brakeDeceleration * this.truck.loadAccelFactor;
+            this.truck.applyAutoBrake(Math.abs(this.truck.speed) / brakeRate + 0.1);
+            if (Math.abs(this.truck.speed) > 0.1) return;
             this.hasArrivedAtDestination = true;
-            
-            // Auto-brake instead of instantly stopping
-            this.truck.applyAutoBrake(0.7);
-            
-            // Show arrival success after a moment
-            setTimeout(() => {
-                this.completeLevel();
-            }, 500);
+            this.completeLevel();
         }
     }
     
@@ -820,8 +766,7 @@ class Game {
         this.truck.position.x = 0; // Reset truck position
         this.truck.position.z = 0;
         this.truck.rotation = 0;
-        this.truck.speed = 0;
-        this.truck.applyTransform();
+        this.truck.resetMotion();
         this.score = { spaceEfficiency: 0, stability: 100 };
         this.fallOutTriggered = false; // Reset the fall-out flag
         this.hasArrivedAtDestination = false; // Reset arrival flag
