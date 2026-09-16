@@ -24,33 +24,34 @@ class Truck {
         this.rotation = 0; // Y-axis rotation (heading)
         this.speed = 0;
         this.prevSpeed = 0;
-        this.maxSpeed = 110; // Top speed 110 mph
-        this.baseAcceleration = 15; // Base acceleration (modified by gear)
-        this.deceleration = 18; // Coasting deceleration
-        this.brakeDeceleration = 60; // Stronger braking
-        this.autoBrakeDeceleration = this.brakeDeceleration; // Use full brakes on drop-off
-        this.turnSpeed = 1.9;   // Sharper turns
-        this.rearAxleOffset = 2.5; // Distance from center to rear axle (pivot point for steering)
+        this.maxSpeed = 65; // Governed road speed in mph
+        this.maxReverseSpeed = 12;
+        this.brakeDeceleration = 14; // mph/s, about 0.64 g unloaded
+        this.rearAxleOffset = 1.8;
+        this.wheelbase = 4.8;
+        this.maxSteerAngle = Math.PI / 6;
+        this.turnInput = 0;
+        this.currentSteerAngle = 0;
         this.currentAcceleration = 0; // For physics effects on items
         this.turnRate = 0; // Current turn rate for physics effects
         this.autoBrakeTimer = 0; // Seconds remaining for automatic braking
         
         // Automatic transmission (dump truck = very slow acceleration)
         this.currentGear = 0; // 0 = Neutral, 1-5 = Forward gears, -1 = Reverse
-        this.gearSpeeds = [0, 25, 50, 75, 95, 110]; // Speed thresholds for upshifting
-        this.gearDownSpeeds = [0, 20, 45, 70, 90, 105]; // Slightly lower for downshifting (hysteresis)
-        this.gearAcceleration = [12, 12, 8, 5, 3, 1.5]; // Heavy dump truck = very sluggish
+        this.gearSpeeds = [0, 0, 10, 22, 35, 50];
+        this.gearDownSpeeds = [0, 0, 8, 19, 31, 46];
+        this.gearAcceleration = [4.5, 4.5, 3.8, 2.8, 2.4, 2.0]; // mph/s
 
         // Payload physics: cargo weight reduces acceleration and lengthens braking (F = ma)
-        this.truckBaseMass = 800; // Effective unladen mass in item-weight units (tuned for feel)
+        this.truckBaseMass = 3500; // kg, same units as cargo weights
         this.payloadWeight = 0;   // Sum of loaded (non-fallen) item weights
-        this.loadAccelFactor = 1; // truckBaseMass / (truckBaseMass + payload), clamped
+        this.loadAccelFactor = 1; // truckBaseMass / (truckBaseMass + payload)
 
         // Suspension weight transfer: spring-damped body lean (radians).
         // Applied to root.rotation.x/z and to the animated cargo bed physics
         // bodies, so cargo physically feels the bed tilt under braking/turning.
-        this.suspensionPitch = 0;    // rotation.x: negative = nose (-Z) dips, e.g. braking from forward
-        this.suspensionRoll = 0;     // rotation.z: body rolls away from the turn center
+        this.suspensionPitch = 0;    // Negative rotation.x lowers the nose (-Z).
+        this.suspensionRoll = 0;     // Negative rotation.z leans toward local +X.
         this.suspensionPitchVel = 0;
         this.suspensionRollVel = 0;
         this.suspensionStiffness = 60;     // Spring rate (1/s^2), ~0.9 damping ratio with damping below
@@ -1256,273 +1257,95 @@ class Truck {
     }
     
     updateDriving(deltaTime, options = {}) {
-        const perfEnabled = this.enablePerfStats === true;
-        const perfStart = perfEnabled ? performance.now() : 0;
-        const dt = Math.min(deltaTime, 0.05); // Cap delta time
-        const inputEnabled = options.inputEnabled !== false;
-        
-        // Debug logging (only log once per second to avoid spam)
-        const nowMs = Date.now();
-        if (!this._lastLogTime) this._lastLogTime = nowMs;
-        if (perfEnabled && !this._perfStats) {
-            this._perfStats = { frames: 0, totalMs: 0, collisionMs: 0, itemsMs: 0 };
-        }
-
-        // Auto-brake countdown
-        if (this.autoBrakeTimer > 0) {
-            this.autoBrakeTimer = Math.max(0, this.autoBrakeTimer - dt);
-        }
+        const dt = Math.min(deltaTime, 1 / 30);
+        if (!(dt > 0)) return;
+        const keys = options.inputEnabled === false
+            ? { w: false, a: false, s: false, d: false, space: false }
+            : this.keys;
         const autoBraking = this.autoBrakeTimer > 0;
-        
-        // Store previous values for acceleration calculation and collision revert
-        this.prevSpeed = this.speed;
+        this.autoBrakeTimer = Math.max(0, this.autoBrakeTimer - dt);
+        const prevX = this.position.x;
+        const prevZ = this.position.z;
         const prevRotation = this.rotation;
-        const prevPosX = this.position.x;
-        const prevPosZ = this.position.z;
-        
-        // Acceleration / Deceleration (Space = brake, W = forward, S = backward)
-        const effectiveKeys = inputEnabled ? this.keys : { w: false, a: false, s: false, d: false, space: false };
-        
-        // Payload physics: heavier cargo means slower acceleration and longer
-        // braking distances. Brakes are less affected than engine power.
+        const previousBodyRotation = this.getTruckBodyQuaternion();
+        this.prevSpeed = this.speed;
+
+        // The HUD/transmission use mph; forces and geometry use meters/seconds.
+        const mphToMps = 0.44704;
         this.payloadWeight = this.getPayloadWeight();
-        this.loadAccelFactor = Math.max(0.5, this.truckBaseMass / (this.truckBaseMass + this.payloadWeight));
-        const loadedBrakeDecel = this.brakeDeceleration * (0.55 + 0.45 * this.loadAccelFactor);
-
-        // Get gear-based acceleration (slower in higher gears)
-        const gearAccel = (this.gearAcceleration[Math.max(0, this.currentGear)] || this.baseAcceleration) * this.loadAccelFactor;
-
-        if (effectiveKeys.space || autoBraking) {
-            // Spacebar = brake only (no reverse), override W/S
-            const brakeDecel = loadedBrakeDecel;
-            if (this.speed > 0) {
-                this.speed = Math.max(0, this.speed - brakeDecel * dt);
-            } else if (this.speed < 0) {
-                this.speed = Math.min(0, this.speed + brakeDecel * dt);
-            }
-        } else if (effectiveKeys.w) {
-            // If moving backward, brake harder first
-            if (this.speed > 0) {
-                this.speed = Math.max(0, this.speed - loadedBrakeDecel * dt);
-            } else {
-                this.speed -= gearAccel * dt; // Negative Z is forward (toward cab)
-            }
-        } else if (effectiveKeys.s) {
-            // If moving forward, brake harder first
-            if (this.speed < 0) {
-                this.speed = Math.min(0, this.speed + loadedBrakeDecel * dt);
-            } else {
-                this.speed += gearAccel * dt;
-            }
+        this.loadAccelFactor = this.truckBaseMass / (this.truckBaseMass + this.payloadWeight);
+        const speedMps = this.speed * mphToMps;
+        const direction = Math.sign(speedMps);
+        const braking = keys.space || autoBraking ||
+            (keys.w && speedMps > 0) || (keys.s && speedMps < 0) ||
+            (keys.w && keys.s);
+        let nextSpeed = speedMps;
+        if (braking) {
+            const brake = this.brakeDeceleration * mphToMps * this.loadAccelFactor;
+            nextSpeed = direction * Math.max(0, Math.abs(speedMps) - brake * dt);
         } else {
-            // Decelerate when no input
-            if (this.speed > 0) {
-                this.speed = Math.max(0, this.speed - this.deceleration * dt);
-            } else if (this.speed < 0) {
-                this.speed = Math.min(0, this.speed + this.deceleration * dt);
+            // Rolling resistance plus aerodynamic drag, independent of frame rate.
+            const resistance = 0.12 + 0.0008 * speedMps * speedMps;
+            if (keys.w || keys.s) {
+                const throttle = keys.w ? -1 : 1;
+                const gearAccel = this.gearAcceleration[Math.max(0, this.currentGear)];
+                const acceleration = gearAccel * mphToMps * this.loadAccelFactor;
+                nextSpeed += throttle * Math.max(0, acceleration - resistance) * dt;
+            } else {
+                nextSpeed = direction * Math.max(0, Math.abs(speedMps) - resistance * dt);
             }
         }
-        
-        // Clamp speed (forward is negative, reverse is positive and slower)
-        this.speed = Math.max(-this.maxSpeed, Math.min(this.maxSpeed * 0.3, this.speed));
-
-        // Snap tiny residual speed to zero only while coasting.
-        // Active W/S input starts from tiny per-frame acceleration values.
-        const hasDrivingInput = effectiveKeys.w || effectiveKeys.s || effectiveKeys.space;
-        if (!hasDrivingInput && !autoBraking && this.autoBrakeTimer === 0 && Math.abs(this.speed) < 0.2) {
-            this.speed = 0;
-        }
-        
-        // Update automatic transmission
-        this.updateGear();
-        
-        // Calculate current acceleration (for item physics)
+        this.speed = Math.max(-this.maxSpeed, Math.min(this.maxReverseSpeed, nextSpeed / mphToMps)) || 0;
         this.currentAcceleration = (this.speed - this.prevSpeed) / dt;
-        
-        // Turning (only when moving) - A = left, D = right
-        this.turnRate = 0;
-        if (this.turnInput === undefined) this.turnInput = 0;
-        const rawTurnInput = (effectiveKeys.a ? 1 : 0) + (effectiveKeys.d ? -1 : 0);
-        const turnLerp = Math.min(1, dt * 12);
-        this.turnInput += (rawTurnInput - this.turnInput) * turnLerp;
-        const isTurning = Math.abs(rawTurnInput) > 0.01;
-        const isBraking = effectiveKeys.space || effectiveKeys.s || autoBraking;
-        
-        // Initialize drift state if needed
-        if (this.driftAngle === undefined) this.driftAngle = 0;
-        if (this.isDrifting === undefined) this.isDrifting = false;
-        
-        // Check for drift conditions: braking + turning + enough speed
-        const speedThreshold = this.maxSpeed * 0.3; // Need at least 30% speed to drift
-        const canDrift = isBraking && isTurning && Math.abs(this.speed) > speedThreshold;
-        
-        if (Math.abs(this.speed) > 0.1) {
-            const turnFactor = this.speed < 0 ? -1 : 1; // Flip turn when going backwards
-            const absSpeed = Math.abs(this.speed);
-            
-            // Turn rate scales with speed - can't turn faster than you're moving
-            // At 5 mph: 25% turn rate, at 20+ mph: full turn rate
-            // A heavy payload also makes steering slightly more sluggish.
-            const speedTurnScale = Math.min(1, absSpeed / 20);
-            const loadTurnScale = 0.82 + 0.18 * this.loadAccelFactor;
-            const effectiveTurnSpeed = this.turnSpeed * speedTurnScale * loadTurnScale;
-            
-            // Scale pivot effect by speed - at low speeds, rotate more from center
-            // At higher speeds, use full rear axle pivot for realistic steering
-            const pivotBlend = Math.min(1, absSpeed / 15); // Full pivot at 15+ mph
-            const effectivePivotOffset = this.rearAxleOffset * pivotBlend;
-            
-            // Calculate pivot point BEFORE rotation
-            const pivotX = this.position.x + Math.sin(this.rotation) * effectivePivotOffset;
-            const pivotZ = this.position.z + Math.cos(this.rotation) * effectivePivotOffset;
-            
-            let deltaRotation = 0;
-            
-            if (canDrift) {
-                // DRIFTING - slight extra rotation, rear slides out a bit
-                this.isDrifting = true;
-                const driftTurnBoost = 1.3; // Slightly faster turn while drifting
-                
-                if (this.turnInput > 0.01) {
-                    const inputScale = Math.min(1, Math.abs(this.turnInput));
-                    deltaRotation = effectiveTurnSpeed * dt * turnFactor * driftTurnBoost * inputScale;
-                    this.turnRate = effectiveTurnSpeed * turnFactor * driftTurnBoost * inputScale;
-                    // Build up drift angle (subtle slide)
-                    this.driftAngle = Math.min(0.15, this.driftAngle + dt * 0.8);
-                }
-                if (this.turnInput < -0.01) {
-                    const inputScale = Math.min(1, Math.abs(this.turnInput));
-                    deltaRotation = -effectiveTurnSpeed * dt * turnFactor * driftTurnBoost * inputScale;
-                    this.turnRate = -effectiveTurnSpeed * turnFactor * driftTurnBoost * inputScale;
-                    this.driftAngle = Math.max(-0.15, this.driftAngle - dt * 0.8);
-                }
-            } else {
-                // Normal turning
-                this.isDrifting = false;
-                if (this.turnInput > 0.01) {
-                    const inputScale = Math.min(1, Math.abs(this.turnInput));
-                    deltaRotation = effectiveTurnSpeed * dt * turnFactor * inputScale;
-                    this.turnRate = effectiveTurnSpeed * turnFactor * inputScale;
-                }
-                if (this.turnInput < -0.01) {
-                    const inputScale = Math.min(1, Math.abs(this.turnInput));
-                    deltaRotation = -effectiveTurnSpeed * dt * turnFactor * inputScale;
-                    this.turnRate = -effectiveTurnSpeed * turnFactor * inputScale;
-                }
-            }
-            
-            // Apply rotation
-            if (deltaRotation !== 0) {
-                this.rotation += deltaRotation;
-                
-                // Pivot around the blended pivot point
-                // At low speeds: pivot near center (no position shift)
-                // At high speeds: pivot around rear axle (front swings out)
-                this.position.x = pivotX - Math.sin(this.rotation) * effectivePivotOffset;
-                this.position.z = pivotZ - Math.cos(this.rotation) * effectivePivotOffset;
-            }
-        } else {
-            this.isDrifting = false;
-        }
 
-        // Prevent rotation that would intersect with nearby obstacles
-        if (this.rotation !== prevRotation) {
-            const collisionStart = perfEnabled ? performance.now() : 0;
-            const rotationCollides = this.checkMeshCollision(this.position.x, this.position.z, this.rotation);
-            if (perfEnabled) this._perfStats.collisionMs += performance.now() - collisionStart;
-            if (rotationCollides) {
-                // Restore both rotation AND position (since we pivot around rear axle)
-                this.rotation = prevRotation;
-                this.position.x = prevPosX;
-                this.position.z = prevPosZ;
-                this.turnRate = 0;
-                this.driftAngle = 0;
-            }
-        }
-        
-        // Decay drift angle when not drifting
-        if (!this.isDrifting) {
-            this.driftAngle *= 0.9; // Gradually return to normal
-            if (Math.abs(this.driftAngle) < 0.01) this.driftAngle = 0;
-        }
-        
-        
-        // Update front wheel steering visual
-        this.updateWheelSteering(effectiveKeys);
-        
-        // Update tail lights based on braking/reversing
-        this.updateTailLights(autoBraking, effectiveKeys);
-        
-        // Update engine sound based on speed and input
-        if (this.audioManager) {
-            const isAccelerating = effectiveKeys.w || effectiveKeys.s;
-            const isBrakingForSound = effectiveKeys.space || autoBraking || 
-                (effectiveKeys.w && this.speed > 0) || (effectiveKeys.s && this.speed < 0);
-            this.audioManager.updateEngineSound(this.speed, this.maxSpeed, isAccelerating, isBrakingForSound);
-        }
-        
-        // Calculate movement direction - during drift, movement is offset from facing
-        const moveDirection = this.rotation + this.driftAngle;
-        // Convert MPH to m/s for world/physics units.
-        const speedMps = this.speed * 0.44704;
-        const moveX = Math.sin(moveDirection) * speedMps * dt;
-        const moveZ = Math.cos(moveDirection) * speedMps * dt;
+        // Bicycle steering about the rear axle. Braking consumes tire grip that
+        // would otherwise be available for cornering (a friction circle).
+        const rawSteer = (keys.a ? 1 : 0) - (keys.d ? 1 : 0);
+        this.turnInput += (rawSteer - this.turnInput) * (1 - Math.exp(-6 * dt));
+        const travelSpeed = (this.speed + this.prevSpeed) * 0.5 * mphToMps;
+        const tireGrip = 0.7 * 9.81;
+        const longitudinalAccel = Math.min(tireGrip, Math.abs(this.currentAcceleration * mphToMps));
+        const lateralGrip = Math.sqrt(Math.max(0, tireGrip * tireGrip - longitudinalAccel * longitudinalAccel));
+        const gripSteerLimit = Math.atan(lateralGrip * this.wheelbase / Math.max(0.01, travelSpeed * travelSpeed));
+        this.currentSteerAngle = this.turnInput * Math.min(this.maxSteerAngle, gripSteerLimit);
+        this.turnRate = -travelSpeed * Math.tan(this.currentSteerAngle) / this.wheelbase;
+        const deltaRotation = this.turnRate * dt;
+        const midpointYaw = prevRotation + deltaRotation / 2;
+        const pivotX = prevX + Math.sin(prevRotation) * this.rearAxleOffset;
+        const pivotZ = prevZ + Math.cos(prevRotation) * this.rearAxleOffset;
+        const nextYaw = prevRotation + deltaRotation;
+        const nextX = pivotX + Math.sin(midpointYaw) * travelSpeed * dt - Math.sin(nextYaw) * this.rearAxleOffset;
+        const nextZ = pivotZ + Math.cos(midpointYaw) * travelSpeed * dt - Math.cos(nextYaw) * this.rearAxleOffset;
 
-        // Store truck world velocity for relative item stabilization (m/s)
-        this._truckWorldVelX = dt > 0 ? (moveX / dt) : 0;
-        this._truckWorldVelZ = dt > 0 ? (moveZ / dt) : 0;
-        this._truckRotationRate = dt > 0 ? ((this.rotation - prevRotation) / dt) : 0;
-        
-        const newPosX = this.position.x + moveX;
-        const newPosZ = this.position.z + moveZ;
-        
-        // Simple collision check using mesh intersection
-        const collisionStart = perfEnabled ? performance.now() : 0;
-        const wouldCollide = this.checkMeshCollision(newPosX, newPosZ);
-        if (perfEnabled) this._perfStats.collisionMs += performance.now() - collisionStart;
-        
-        if (!wouldCollide) {
-            // No collision - move normally
-            this.position.x = newPosX;
-            this.position.z = newPosZ;
+        if (!this.checkMeshCollision(nextX, nextZ, nextYaw)) {
+            this.position.x = nextX;
+            this.position.z = nextZ;
+            this.rotation = nextYaw;
         } else {
-            // Collision - just stop. No sliding, no pushing, no jerking.
-            this.speed *= 0.5; // Reduce speed on impact
+            // Use the actual stopped transform for cargo velocity on impact.
+            this.speed = 0;
+            this.turnRate = 0;
+            this.currentAcceleration = (this.speed - this.prevSpeed) / dt;
         }
-        
-        // Suspension weight transfer: lean the body from the acceleration
-        // forces computed above (needs currentAcceleration and turnRate)
+        this._truckWorldVelX = (this.position.x - prevX) / dt;
+        this._truckWorldVelZ = (this.position.z - prevZ) / dt;
+        this._truckRotationRate = (this.rotation - prevRotation) / dt;
+        this.updateGear();
+        this.isDrifting = false;
+        this.driftAngle = 0;
         this.updateSuspension(dt);
+        const rotationDelta = this.getTruckBodyQuaternion().multiply(BABYLON.Quaternion.Inverse(previousBodyRotation));
+        // Include yaw, pitch, and roll in the initial velocity of newly loaded cargo.
+        const angularDelta = rotationDelta;
+        this._truckAngularVelocity = new BABYLON.Vector3(angularDelta.x, angularDelta.y, angularDelta.z).scale(2 / dt);
 
-        // Apply to all meshes
         this.applyTransform();
-        
-        // Enable CCD only when needed to prevent tunneling without heavy cost
-        this.updateItemCcd();
-        
-        // Move loaded items with truck and apply physics forces
-        if (this.enableItemPhysics) {
-            const itemsStart = perfEnabled ? performance.now() : 0;
-        this.updateLoadedItems(dt, moveX, moveZ, this.rotation - prevRotation);
-            if (perfEnabled) this._perfStats.itemsMs += performance.now() - itemsStart;
+        this.updateWheelSteering(keys);
+        this.updateTailLights(autoBraking, keys);
+        if (this.audioManager) {
+            this.audioManager.updateEngineSound(this.speed, this.maxSpeed, keys.w || keys.s, braking);
         }
-        
-        // Update debug collision boxes if enabled
         this.updateCollisionDebug();
-
-        // Perf logging (once per second)
-        if (perfEnabled) {
-            const perfEnd = performance.now();
-            this._perfStats.frames += 1;
-            this._perfStats.totalMs += (perfEnd - perfStart);
-        }
-        if (perfEnabled && nowMs - this._lastLogTime >= 1000) {
-            this._perfStats.frames = 0;
-            this._perfStats.totalMs = 0;
-            this._perfStats.collisionMs = 0;
-            this._perfStats.itemsMs = 0;
-            this._lastLogTime = nowMs;
-        }
     }
 
     setItemCcdEnabled(body, enabled) {
@@ -1645,7 +1468,8 @@ class Truck {
         }
         
         // Return whether gear changed (for audio feedback)
-        this.gearJustChanged = prevGear !== this.currentGear && prevGear !== 0 && this.currentGear !== 0;
+        this.gearJustChanged = this.gearJustChanged ||
+            (prevGear !== this.currentGear && prevGear !== 0 && this.currentGear !== 0);
     }
     
     getGearDisplay() {
@@ -1654,27 +1478,9 @@ class Truck {
         return this.currentGear.toString();
     }
 
-    updateWheelSteering(keys) {
-        if (!this.frontWheelNodes || this.frontWheelNodes.length === 0) return;
-        
-        // Target steering angle based on input (max ~30 degrees)
-        const maxSteerAngle = Math.PI / 6; // 30 degrees
-        let targetAngle = 0;
-        
-        if (keys.a) targetAngle = -maxSteerAngle; // Turn left
-        if (keys.d) targetAngle = maxSteerAngle;  // Turn right
-        
-        // Store current steering angle if not set
-        if (this.currentSteerAngle === undefined) this.currentSteerAngle = 0;
-        
-        // Smoothly interpolate to target angle
-        const steerSpeed = 0.15;
-        this.currentSteerAngle += (targetAngle - this.currentSteerAngle) * steerSpeed;
-        
-        // Apply rotation to front wheel nodes (indexed loop avoids iterator creation)
-        const angle = this.currentSteerAngle;
-        for (let i = 0; i < this.frontWheelNodes.length; i++) {
-            this.frontWheelNodes[i].rotation.y = angle;
+    updateWheelSteering() {
+        for (const node of this.frontWheelNodes || []) {
+            node.rotation.y = this.currentSteerAngle;
         }
     }
     
@@ -1745,861 +1551,64 @@ class Truck {
         this.loadedItems.push(item);
     }
 
-    restoreItemMotionType(item, body, nowMs) {
-        if (!item || !body || !body.setMotionType) return;
-        if (!item._restoreMotionAt || nowMs < item._restoreMotionAt) return;
-        const restoreType = item._restoreMotionType ?? BABYLON.PhysicsMotionType.DYNAMIC;
-        // CRITICAL: Zero velocities before restoring to prevent explosion
-        if (body.setLinearVelocity) body.setLinearVelocity(BABYLON.Vector3.Zero());
-        if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
-        if (body.setPrestepType && BABYLON.PhysicsPrestepType && restoreType === BABYLON.PhysicsMotionType.DYNAMIC) {
-            body.setPrestepType(BABYLON.PhysicsPrestepType.DISABLED);
-        }
-        body.setMotionType(restoreType);
-        item._restoreMotionAt = 0;
-        item._restoreMotionType = null;
-    }
-
-    teleportItemBody(item, body, position, rotation, nowMs) {
-        if (!body || !body.setMotionType || !body.getMotionType) return;
-        const currentType = body.getMotionType();
-        item._restoreMotionType = currentType;
-        // Use ANIMATED to move the body explicitly while it settles.
-        item._restoreMotionAt = nowMs + 150;
-        body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
-        if (body.setPrestepType && BABYLON.PhysicsPrestepType) {
-            body.setPrestepType(BABYLON.PhysicsPrestepType.TELEPORT);
-        }
-        // Zero velocities immediately
-        if (body.setLinearVelocity) body.setLinearVelocity(BABYLON.Vector3.Zero());
-        if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
-        // Direct position update for animated bodies
-        if (body.setTargetTransform) {
-            body.setTargetTransform(position, rotation);
-        }
-    }
-
-    getSettledItemPose(item, worldMatrix) {
-        const localX = item.settleLocalX ?? item.localX ?? 0;
-        const localY = item.settleLocalY ?? item.localY ?? item.mesh.position.y;
-        const localZ = item.settleLocalZ ?? item.localZ ?? 0;
-        const position = BABYLON.Vector3.TransformCoordinates(
-            new BABYLON.Vector3(localX, localY, localZ),
-            worldMatrix
+    getPointVelocity(worldPosition) {
+        const offset = worldPosition.subtract(this.position);
+        const angular = this._truckAngularVelocity || BABYLON.Vector3.Zero();
+        return BABYLON.Vector3.Cross(angular, offset).add(
+            new BABYLON.Vector3(this._truckWorldVelX || 0, 0, this._truckWorldVelZ || 0)
         );
-
-        const truckQuat = this.getTruckBodyQuaternion();
-        const localQuat = item.localQuat
-            ? item.localQuat
-            : BABYLON.Quaternion.RotationYawPitchRoll(item.localRotation || 0, 0, 0);
-
-        return {
-            position,
-            rotation: truckQuat.multiply(localQuat)
-        };
-    }
-
-    getTruckPointVelocity(worldX, worldZ, truckVelX, truckVelZ, rotationRate) {
-        const relX = worldX - this.position.x;
-        const relZ = worldZ - this.position.z;
-
-        return new BABYLON.Vector3(
-            truckVelX + rotationRate * relZ,
-            0,
-            truckVelZ - rotationRate * relX
-        );
-    }
-
-    applyCargoStaticFriction(item, body, localX, localY, localZ, halfX, halfY, halfZ, truckVelX, truckVelZ, rotationRate) {
-        if (!item || !body || !body.getLinearVelocity || !body.setLinearVelocity) return false;
-
-        const insideCargo =
-            Math.abs(localX) <= this.cargoWidth / 2 + halfX &&
-            localZ >= -this.cargoLength / 2 - halfZ &&
-            localZ <= this.cargoLength / 2 + halfZ;
-        const restingCenterY = this.floorTopY + halfY;
-        const restingOnBed =
-            localY >= restingCenterY - 0.18 &&
-            localY <= restingCenterY + 0.26;
-
-        item.mesh.computeWorldMatrix(true);
-        const itemUp = BABYLON.Vector3.TransformNormal(BABYLON.Axis.Y, item.mesh.getWorldMatrix());
-        itemUp.normalize();
-        const uprightEnough = itemUp.y > 0.72;
-
-        // Static friction should hold during normal driving, then break loose
-        // under hard braking, sharp acceleration, or strong turning.
-        const longitudinalAccel = Math.abs(this.currentAcceleration || 0) * 0.44704;
-        const lateralAccel = Math.abs((this.speed || 0) * 0.44704 * rotationRate);
-        const staticAccelLimit = 13.0;
-        const staticTurnAccelLimit = 9.0;
-        const canHold =
-            insideCargo &&
-            restingOnBed &&
-            uprightEnough &&
-            longitudinalAccel <= staticAccelLimit &&
-            lateralAccel <= staticTurnAccelLimit;
-
-        const bedVelocity = this.getTruckPointVelocity(
-            item.mesh.position.x,
-            item.mesh.position.z,
-            truckVelX,
-            truckVelZ,
-            rotationRate
-        );
-        const vel = body.getLinearVelocity();
-        if (!vel) return false;
-
-        const slipSpeed = Math.sqrt(
-            Math.pow(vel.x - bedVelocity.x, 2) +
-            Math.pow(vel.z - bedVelocity.z, 2)
-        );
-        const maxStaticSlip = item._staticFrictionHeld ? Infinity : 1.1;
-
-        if (canHold && slipSpeed <= maxStaticSlip) {
-            if (!item._staticFrictionHeld) {
-                item._staticFrictionLocalX = localX;
-                item._staticFrictionLocalY = localY;
-                item._staticFrictionLocalZ = localZ;
-
-                const worldQuat = item.mesh.rotationQuaternion
-                    ? item.mesh.rotationQuaternion.clone()
-                    : BABYLON.Quaternion.RotationYawPitchRoll(
-                        item.mesh.rotation.y,
-                        item.mesh.rotation.x,
-                        item.mesh.rotation.z
-                    );
-                const truckQuat = this.getTruckBodyQuaternion();
-                const truckQuatInv = BABYLON.Quaternion.Inverse(truckQuat);
-                item._staticFrictionLocalQuat = truckQuatInv.multiply(worldQuat);
-
-                if (body.setMotionType) {
-                    body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
-                }
-                if (body.setPrestepType && BABYLON.PhysicsPrestepType) {
-                    body.setPrestepType(BABYLON.PhysicsPrestepType.TELEPORT);
-                }
-            }
-
-            const targetLocal = new BABYLON.Vector3(
-                item._staticFrictionLocalX ?? localX,
-                item._staticFrictionLocalY ?? localY,
-                item._staticFrictionLocalZ ?? localZ
-            );
-            const targetWorld = BABYLON.Vector3.TransformCoordinates(targetLocal, this.root.getWorldMatrix());
-            const truckQuat = this.getTruckBodyQuaternion();
-            const targetQuat = truckQuat.multiply(
-                item._staticFrictionLocalQuat || item.localQuat || BABYLON.Quaternion.Identity()
-            );
-
-            item.mesh.position.copyFrom(targetWorld);
-            if (!item.mesh.rotationQuaternion) {
-                item.mesh.rotationQuaternion = targetQuat;
-            } else {
-                item.mesh.rotationQuaternion.copyFrom(targetQuat);
-            }
-            item.mesh.computeWorldMatrix(true);
-
-            if (body.setTargetTransform) {
-                body.setTargetTransform(targetWorld, targetQuat);
-            }
-            body.setLinearVelocity(bedVelocity);
-            if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
-            if (body.setLinearDamping) body.setLinearDamping(item.baseLinearDamping || 1.0);
-            if (body.setAngularDamping) body.setAngularDamping(Math.max(item.baseAngularDamping || 1.35, 1.5));
-            item._staticFrictionHeld = true;
-            return true;
-        }
-
-        if (item._staticFrictionHeld) {
-            if (body.setPrestepType && BABYLON.PhysicsPrestepType) {
-                body.setPrestepType(BABYLON.PhysicsPrestepType.DISABLED);
-            }
-            if (body.setMotionType) {
-                body.setMotionType(BABYLON.PhysicsMotionType.DYNAMIC);
-            }
-            body.setLinearVelocity(bedVelocity);
-            if (body.setAngularVelocity) body.setAngularVelocity(BABYLON.Vector3.Zero());
-        }
-
-        item._staticFrictionHeld = false;
-        item._staticFrictionLocalX = null;
-        item._staticFrictionLocalY = null;
-        item._staticFrictionLocalZ = null;
-        item._staticFrictionLocalQuat = null;
-        return false;
-    }
-
-    updateLoadedItems(dt, moveX, moveZ, rotationDelta) {
-        // Items are physics bodies that collide with the truck's animated walls/floor.
-        // Havok handles sliding, tipping, and impacts; the static-friction pass
-        // below only keeps resting cargo coupled to the moving bed until normal
-        // friction would break under hard acceleration, braking, or turning.
-
-        // CRITICAL: Sync root transform with current position/rotation BEFORE computing matrix
-        // (applyTransform happens AFTER this function, so root may be stale)
-        this.root.position.x = this.position.x;
-        this.root.position.z = this.position.z;
-        this.syncRootRotation();
-
-        // Use Babylon's matrices for coordinate transforms (guaranteed correct)
-        this.root.computeWorldMatrix(true);
-        const worldMatrix = this.root.getWorldMatrix();
-        const invMatrix = worldMatrix.clone();
-        invMatrix.invert();
-        
-        const itemsNowMs = performance.now();
-        const maxSafeVelocity = 45; // Emergency guard only; normal cargo motion is handled by Havok.
-        const maxSafeAngularVelocity = 35;
-
-        const truckVelX = dt > 0 ? (moveX / dt) : 0;
-        const truckVelZ = dt > 0 ? (moveZ / dt) : 0;
-        const truckMotionSpeed = Math.sqrt(truckVelX * truckVelX + truckVelZ * truckVelZ);
-        const rotationRate = dt > 0 ? rotationDelta / dt : 0;
-        const truckIsActivelyMoving =
-            truckMotionSpeed > 0.2 ||
-            Math.abs(rotationRate) > 0.05 ||
-            this.keys.w ||
-            this.keys.s ||
-            this.keys.a ||
-            this.keys.d;
-        
-        let riskLines = [];
-        const diagNowMs = performance.now();
-        const logIntervalMs = 1200;
-        const canLog = !this._itemDiagLastLog || diagNowMs - this._itemDiagLastLog > logIntervalMs;
-        
-        for (let i = 0; i < this.loadedItems.length; i++) {
-            const item = this.loadedItems[i];
-            if (!item.mesh) continue;
-
-            // PARENTED ITEMS: Skip all physics processing - they move with truck automatically!
-            if (item.isParented && item.mesh.parent === this.root) {
-                continue; // Item is parented to truck.root, no updates needed
-            }
-
-            const body = item.mesh.physicsAggregate && item.mesh.physicsAggregate.body;
-
-            // Restore items that were temporarily made animated for teleportation
-            this.restoreItemMotionType(item, body, itemsNowMs);
-
-            // Create physics for newly placed items after settling period
-            if (!body && item.createPhysicsAt && itemsNowMs >= item.createPhysicsAt && item.mesh._pendingPhysics) {
-                const params = item.mesh._pendingPhysics;
-
-                // SAFETY: Ensure item is within bounds before creating physics
-                // This prevents collision impulses from walls
-                const itemLocalVec = BABYLON.Vector3.TransformCoordinates(
-                    new BABYLON.Vector3(item.mesh.position.x, item.mesh.position.y, item.mesh.position.z),
-                    invMatrix
-                );
-                const halfX = item.size ? item.size.x / 2 : 0.3;
-                const halfZ = item.size ? item.size.z / 2 : 0.3;
-                const availableHalfWidth = Math.max(0, this.cargoWidth / 2 - halfX);
-                const availableHalfLength = Math.max(0, this.cargoLength / 2 - halfZ);
-                const marginX = Math.min(0.08, availableHalfWidth * 0.5);
-                const marginZ = Math.min(0.08, availableHalfLength * 0.5);
-
-                const maxX = Math.max(0, this.cargoWidth / 2 - halfX - marginX);
-                const minZ = Math.min(0, -this.cargoLength / 2 + halfZ + marginZ);
-                const maxZ = Math.max(0, this.cargoLength / 2 - halfZ - marginZ);
-
-                let needsAdjust = false;
-                let safeLocalX = itemLocalVec.x;
-                let safeLocalZ = itemLocalVec.z;
-
-                if (maxX === 0) {
-                    if (safeLocalX !== 0) {
-                        safeLocalX = 0;
-                        needsAdjust = true;
-                    }
-                } else {
-                    if (safeLocalX < -maxX) { safeLocalX = -maxX; needsAdjust = true; }
-                    if (safeLocalX > maxX) { safeLocalX = maxX; needsAdjust = true; }
-                }
-                if (safeLocalZ < minZ) { safeLocalZ = minZ; needsAdjust = true; }
-                if (safeLocalZ > maxZ) { safeLocalZ = maxZ; needsAdjust = true; }
-
-                if (needsAdjust) {
-                    // Move item to safe position before creating physics
-                    const safeWorldVec = BABYLON.Vector3.TransformCoordinates(
-                        new BABYLON.Vector3(safeLocalX, itemLocalVec.y, safeLocalZ),
-                        worldMatrix
-                    );
-                    item.mesh.position.x = safeWorldVec.x;
-                    item.mesh.position.z = safeWorldVec.z;
-                    item.localX = safeLocalX;
-                    item.localZ = safeLocalZ;
-                    console.log(`⚠️ ADJUSTED ${item.id} position before physics creation`);
-                }
-
-                console.log(`⚙️ CREATING PHYSICS for ${item.id}. LocalPos: (${safeLocalX.toFixed(2)}, ${safeLocalZ.toFixed(2)})`);
-
-                // Create physics aggregate
-                const aggregate = new BABYLON.PhysicsAggregate(
-                    item.mesh,
-                    BABYLON.PhysicsShapeType.BOX,
-                    {
-                        mass: params.mass,
-                        restitution: params.restitution,
-                        friction: params.friction
-                    },
-                    this.scene
-                );
-                item.mesh.physicsAggregate = aggregate;
-
-                if (aggregate.shape && aggregate.shape.setMargin) {
-                    aggregate.shape.setMargin(0.01);
-                }
-
-                if (aggregate.body) {
-                    // Hold as ANIMATED until the item can be released cleanly.
-                    aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
-                    if (aggregate.body.setPrestepType && BABYLON.PhysicsPrestepType) {
-                        aggregate.body.setPrestepType(BABYLON.PhysicsPrestepType.TELEPORT);
-                    }
-
-                    // Zero velocities
-                    aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
-                    aggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
-
-                    // Apply very high damping
-                    aggregate.body.setLinearDamping(30.0);
-                    aggregate.body.setAngularDamping(40.0);
-
-                    // Set collision filters
-                    if (aggregate.body.setCollisionFilterMembership) {
-                        aggregate.body.setCollisionFilterMembership(1);
-                        aggregate.body.setCollisionFilterCollideMask(1 | 2);
-                    }
-                }
-
-                // Clear pending physics flag, set time to become DYNAMIC
-                item.mesh._pendingPhysics = null;
-                item.createPhysicsAt = 0;
-                item.becomeDynamicAt = itemsNowMs + 200; // Brief animated settle period
-
-                continue;
-            }
-
-            // Transition from animated placement hold to DYNAMIC after physics creation.
-            // Preserve the intended local bed pose until this moment; reading the
-            // animated body's lagging position can turn the settle phase into a launch.
-            if (body && item.becomeDynamicAt) {
-                const settleAgeMs = item.settleStartedAt ? itemsNowMs - item.settleStartedAt : Infinity;
-                const movingReleaseReady = truckIsActivelyMoving && settleAgeMs >= 50;
-                const timedReleaseReady = itemsNowMs >= item.becomeDynamicAt;
-
-                if (!movingReleaseReady && !timedReleaseReady) {
-                    // Let the settle block below keep driving the target transform.
-                } else {
-                    const pose = this.getSettledItemPose(item, worldMatrix);
-                    item.mesh.position.copyFrom(pose.position);
-                    if (!item.mesh.rotationQuaternion) {
-                        item.mesh.rotationQuaternion = pose.rotation.clone();
-                    } else {
-                        item.mesh.rotationQuaternion.copyFrom(pose.rotation);
-                    }
-                    item.mesh.computeWorldMatrix(true);
-
-                    if (body.setTargetTransform) {
-                        body.setTargetTransform(pose.position, pose.rotation);
-                    }
-                    if (body.setPrestepType && BABYLON.PhysicsPrestepType) {
-                        body.setPrestepType(BABYLON.PhysicsPrestepType.DISABLED);
-                    }
-
-                    const relX = pose.position.x - this.position.x;
-                    const relZ = pose.position.z - this.position.z;
-                    const releaseVelocity = new BABYLON.Vector3(
-                        truckVelX + rotationRate * relZ,
-                        0,
-                        truckVelZ - rotationRate * relX
-                    );
-
-                    // Match the truck's current world velocity at release. This is
-                    // the physical initial condition for cargo that was resting on
-                    // the moving bed, and avoids a wall-slam impulse.
-                    body.setLinearVelocity(releaseVelocity);
-                    body.setAngularVelocity(BABYLON.Vector3.Zero());
-
-                    // Transition to DYNAMIC
-                    body.setMotionType(BABYLON.PhysicsMotionType.DYNAMIC);
-
-                    // Re-apply after motion-type change; Havok may reset velocity.
-                    body.setLinearVelocity(releaseVelocity);
-                    body.setAngularVelocity(BABYLON.Vector3.Zero());
-
-                    body.setLinearDamping(item.baseLinearDamping || 1.0);
-                    body.setAngularDamping(item.baseAngularDamping || 1.35);
-
-                    item.localX = item.settleLocalX ?? item.localX;
-                    item.localY = item.settleLocalY ?? item.localY;
-                    item.localZ = item.settleLocalZ ?? item.localZ;
-                    item.settleLocalX = null;
-                    item.settleLocalY = null;
-                    item.settleLocalZ = null;
-                    item.becomeDynamicAt = 0;
-                    console.log(`✅ ${item.id} now DYNAMIC`);
-                }
-            }
-
-            // Items without physics OR still animated need to move with the truck
-            // to stay in their local cargo position
-            const motionType = body && body.getMotionType ? body.getMotionType() : null;
-            const isTemporarilyAnimated = body &&
-                item._restoreMotionAt &&
-                itemsNowMs < item._restoreMotionAt &&
-                motionType === BABYLON.PhysicsMotionType.ANIMATED;
-
-            if ((item.createPhysicsAt && item.createPhysicsAt > 0) ||
-                (item.becomeDynamicAt && item.becomeDynamicAt > 0) ||
-                isTemporarilyAnimated) {
-                // Log to verify we're in settling mode
-                if (!item._loggedSkip) {
-                    console.log(`⏳ SETTLING ${item.id} - moving with truck`);
-                    item._loggedSkip = true;
-                }
-
-                // Move item with truck by maintaining its local position
-                // This prevents items from being left behind when truck moves during settling
-                if (item.localX !== undefined && item.localZ !== undefined) {
-                    // Use Babylon's matrix for local-to-world transformation
-                    const targetLocalX = item.settleLocalX ?? item.localX;
-                    const targetLocalY = item.settleLocalY ?? item.localY ?? item.mesh.position.y;
-                    const targetLocalZ = item.settleLocalZ ?? item.localZ;
-                    const localVec = new BABYLON.Vector3(targetLocalX, targetLocalY, targetLocalZ);
-                    const worldVec = BABYLON.Vector3.TransformCoordinates(localVec, worldMatrix);
-                    item.mesh.position.copyFrom(worldVec);
-
-                    // Also update rotation using localQuat (stored in addLoadedItem)
-                    if (item.localQuat) {
-                        const truckQuat = this.getTruckBodyQuaternion();
-                        const worldQuat = truckQuat.multiply(item.localQuat);
-                        if (!item.mesh.rotationQuaternion) {
-                            item.mesh.rotationQuaternion = worldQuat;
-                        } else {
-                            item.mesh.rotationQuaternion.copyFrom(worldQuat);
-                        }
-                    }
-                    item.mesh.computeWorldMatrix(true);
-
-                    // If body exists (kinematic phase), update its transform too
-                    if (body) {
-                        const quat = item.mesh.rotationQuaternion || BABYLON.Quaternion.Identity();
-                        if (!this._settleTargetPos) {
-                            this._settleTargetPos = new BABYLON.Vector3();
-                        }
-                        this._settleTargetPos.set(worldVec.x, worldVec.y, worldVec.z);
-                        body.setTargetTransform(this._settleTargetPos, quat);
-                    }
-                }
-                continue;
-            }
-
-            // Calculate local position using Babylon's inverse matrix
-            const worldVec = new BABYLON.Vector3(item.mesh.position.x, item.mesh.position.y, item.mesh.position.z);
-            const localVec = BABYLON.Vector3.TransformCoordinates(worldVec, invMatrix);
-            const localX = localVec.x;
-            const localZ = localVec.z;
-            const localY = localVec.y;
-
-            const halfX = item.size ? item.size.x / 2 : 0.3;
-            const halfZ = item.size ? item.size.z / 2 : 0.3;
-            const halfY = item.size ? item.size.y / 2 : 0.3;
-
-            // Update local position tracking
-            if (item.mesh.physicsAggregate) {
-                item.localX = localX;
-                item.localZ = localZ;
-                item.localY = localY;
-            }
-            
-            if (body && !item.isFallen) {
-                if (item.wasPlacedAsleep && !item._wokeForTruckMotion && truckIsActivelyMoving) {
-                    const wakeVelocity = this.getTruckPointVelocity(
-                        item.mesh.position.x,
-                        item.mesh.position.z,
-                        truckVelX,
-                        truckVelZ,
-                        rotationRate
-                    );
-
-                    body.setLinearVelocity(wakeVelocity);
-                    body.setAngularVelocity(BABYLON.Vector3.Zero());
-                    item._wokeForTruckMotion = true;
-                }
-
-                const heldByStaticFriction = this.applyCargoStaticFriction(
-                    item,
-                    body,
-                    localX,
-                    localY,
-                    localZ,
-                    halfX,
-                    halfY,
-                    halfZ,
-                    truckVelX,
-                    truckVelZ,
-                    rotationRate
-                );
-
-                if (body.getLinearVelocity && body.setLinearVelocity) {
-                    const vel = body.getLinearVelocity();
-                    if (vel) {
-                        const overCargoFootprint =
-                            Math.abs(localX) <= this.cargoWidth / 2 + halfX &&
-                            localZ >= -this.cargoLength / 2 - halfZ &&
-                            localZ <= this.cargoLength / 2 + halfZ;
-
-                        if (overCargoFootprint) {
-                            const maxUpVelocity = 0.35;
-                            const cargoSoftCeilingY = this.floorTopY + this.cargoHeight + halfY;
-                            const restingCenterY = this.floorTopY + halfY;
-                            const nearBedSurface = localY <= restingCenterY + 0.22;
-                            let guardedVel = null;
-
-                            if (!heldByStaticFriction && nearBedSurface) {
-                                const bedVelocity = this.getTruckPointVelocity(
-                                    item.mesh.position.x,
-                                    item.mesh.position.z,
-                                    truckVelX,
-                                    truckVelZ,
-                                    rotationRate
-                                );
-                                const relX = vel.x - bedVelocity.x;
-                                const relZ = vel.z - bedVelocity.z;
-                                const slipSpeed = Math.sqrt(relX * relX + relZ * relZ);
-                                if (slipSpeed > 0.05) {
-                                    const slipRetention = Math.pow(0.5, Math.min(dt, 0.05) / 0.045);
-                                    guardedVel = new BABYLON.Vector3(
-                                        bedVelocity.x + relX * slipRetention,
-                                        vel.y,
-                                        bedVelocity.z + relZ * slipRetention
-                                    );
-                                }
-                            }
-
-                            if (nearBedSurface && vel.y > 0.05) {
-                                guardedVel = new BABYLON.Vector3(
-                                    guardedVel ? guardedVel.x : vel.x,
-                                    Math.min(vel.y * 0.25, 0.14),
-                                    guardedVel ? guardedVel.z : vel.z
-                                );
-                            } else if (vel.y > maxUpVelocity) {
-                                guardedVel = new BABYLON.Vector3(
-                                    guardedVel ? guardedVel.x : vel.x,
-                                    maxUpVelocity,
-                                    guardedVel ? guardedVel.z : vel.z
-                                );
-                            }
-
-                            if (item.mesh.position.y > cargoSoftCeilingY) {
-                                const downwardY = Math.min(guardedVel ? guardedVel.y : vel.y, -2.0);
-                                guardedVel = new BABYLON.Vector3(
-                                    guardedVel ? guardedVel.x : vel.x,
-                                    downwardY,
-                                    guardedVel ? guardedVel.z : vel.z
-                                );
-                            }
-
-                            if (guardedVel) {
-                                body.setLinearVelocity(guardedVel);
-                                vel.x = guardedVel.x;
-                                vel.y = guardedVel.y;
-                                vel.z = guardedVel.z;
-                            }
-                        }
-
-                        const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
-                        if (speed > maxSafeVelocity) {
-                            const scale = maxSafeVelocity / speed;
-                            body.setLinearVelocity(new BABYLON.Vector3(vel.x * scale, vel.y * scale, vel.z * scale));
-                        }
-                    }
-                }
-                if (body.getAngularVelocity && body.setAngularVelocity) {
-                    const angVel = body.getAngularVelocity();
-                    if (angVel) {
-                        const angSpeed = Math.sqrt(angVel.x * angVel.x + angVel.y * angVel.y + angVel.z * angVel.z);
-                        const airborne = item.mesh.position.y > this.floorTopY + halfY + 0.25;
-                        const angularLimit = airborne ? 8 : maxSafeAngularVelocity;
-                        if (angSpeed > angularLimit) {
-                            const scale = angularLimit / angSpeed;
-                            body.setAngularVelocity(new BABYLON.Vector3(
-                                angVel.x * scale,
-                                angVel.y * scale,
-                                angVel.z * scale
-                            ));
-                        }
-                    }
-                }
-            }
-            
-            // Check if item has fallen out of truck
-            if (!item.isFallen) {
-                const itemHalfX = item.size ? item.size.x / 2 : 0.25;
-                const itemHalfZ = item.size ? item.size.z / 2 : 0.25;
-                const maxX = this.cargoWidth / 2 + 1.0;
-                const maxZ = this.cargoLength / 2 + 1.0;
-                
-                if (item.mesh.position.y < this.floorTopY - 0.5 ||
-                    Math.abs(localX) > maxX + itemHalfX ||
-                    localZ > maxZ + itemHalfZ) {
-                    item.isFallen = true;
-                }
-            }
-            
-            // Diagnostic logging
-            if (canLog && !item.isFallen) {
-                const nearSide = Math.abs(localX) > (this.cargoWidth / 2 - 0.2);
-                const nearBack = localZ > (this.cargoLength / 2 - 0.6);
-                const nearFront = localZ < (-this.cargoLength / 2 + 0.3);
-                if (nearSide || nearBack || nearFront) {
-                    let velStr = 'vel n/a';
-                    let angStr = 'ang n/a';
-                    if (body && body.getLinearVelocity) {
-                        const v = body.getLinearVelocity();
-                        if (v) velStr = `vel ${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`;
-                    }
-                    if (body && body.getAngularVelocity) {
-                        const w = body.getAngularVelocity();
-                        if (w) angStr = `ang ${w.x.toFixed(2)},${w.y.toFixed(2)},${w.z.toFixed(2)}`;
-                    }
-                    const ccd = item._ccdEnabled ? 'ccd on' : 'ccd off';
-                    riskLines.push(
-                        `- ${item.id || item.mesh.name}: ` +
-                        `loc ${localX.toFixed(2)},${localZ.toFixed(2)} ` +
-                        `y ${item.mesh.position.y.toFixed(2)} ` +
-                        `${velStr} ${angStr} ${ccd}` +
-                        `${nearSide ? ' SIDE' : ''}${nearBack ? ' BACK' : ''}${nearFront ? ' FRONT' : ''}`
-                    );
-                }
-            } else if (item.isFallen && !item._fallLogged && canLog) {
-                riskLines.push(
-                    `- ${item.id || item.mesh.name}: FELL OUT at ` +
-                    `loc ${localX.toFixed(2)},${localZ.toFixed(2)} ` +
-                    `y ${item.mesh.position.y.toFixed(2)}`
-                );
-                item._fallLogged = true;
-            }
-        }
-        
-        if (canLog && riskLines.length > 0) {
-            const speedMph = Math.abs(this.speed);
-            const header = [
-                `[ItemDiag] t=${(diagNowMs / 1000).toFixed(1)}s`,
-                `spd=${speedMph.toFixed(1)}mph`,
-                `turn=${this.turnRate.toFixed(2)}`,
-                `accel=${this.currentAcceleration.toFixed(1)}`,
-                `items=${this.loadedItems.length}`
-            ].join(' ');
-            console.log(`${header}\n${riskLines.join('\n')}`);
-            this._itemDiagLastLog = diagNowMs;
-        }
     }
 
     enforceItemBounds() {
-        // Runs after physics to track cargo in truck-local coordinates and catch
-        // rare floor tunneling. Wall contact is left to Havok so cargo can roll,
-        // slide, and tip naturally in physics mode.
-        if (!this.loadedItems || this.loadedItems.length === 0) return;
-        
-        // Log once to verify this function is being called
-        if (!this._enforceItemBoundsLogged) {
-            this._enforceItemBoundsLogged = true;
-            console.log('✅ enforceItemBounds is running (post-physics)');
-        }
-
-        this.root.position.x = this.position.x;
-        this.root.position.z = this.position.z;
-        this.syncRootRotation();
+        if (!this.loadedItems.length) return;
         this.root.computeWorldMatrix(true);
-        const worldMatrix = this.root.getWorldMatrix();
-        const invMatrix = worldMatrix.clone();
-        invMatrix.invert();
-        
-        const floorCorrectionTolerance = 0.4;
-        
-        // Outer bounds - beyond this is definitely fallen
-        const outerHalfX = this.cargoWidth / 2 + 1.0;
-        const outerFrontZ = -this.cargoLength / 2 - 1.0;
-        const outerBackZ = this.cargoLength / 2 + 2.0;
-        const floorY = this.floorTopY - 0.5;
-        const nowMs = performance.now();
-        
-        for (let i = 0; i < this.loadedItems.length; i++) {
-            const item = this.loadedItems[i];
+        const inverse = BABYLON.Matrix.Invert(this.root.getWorldMatrix());
+        for (const item of this.loadedItems) {
             if (!item.mesh || item.isFallen) continue;
+            item.mesh.computeWorldMatrix(true);
+            const center = BABYLON.Vector3.TransformCoordinates(item.mesh.getAbsolutePosition(), inverse);
+            item.localX = center.x;
+            item.localY = center.y;
+            item.localZ = center.z;
+            if (item.isParented) continue;
 
-            // Skip items that don't have physics yet or are in the placement
-            // handoff. Their intended local pose is owned by updateLoadedItems
-            // until they become dynamic.
-            if ((item.createPhysicsAt && item.createPhysicsAt > 0) ||
-                (item.becomeDynamicAt && item.becomeDynamicAt > 0)) {
-                continue;
-            }
-
-            const body = item.mesh.physicsAggregate && item.mesh.physicsAggregate.body;
-            this.restoreItemMotionType(item, body, nowMs);
-            
-            const halfX = item.size ? item.size.x / 2 : 0.3;
-            const halfZ = item.size ? item.size.z / 2 : 0.3;
-            const halfY = item.size ? item.size.y / 2 : 0.3;
-
-            // Calculate local position (item center relative to truck center)
-            let localX, localZ, localY;
-            if (item.isParented && item.mesh.parent === this.root) {
-                // Item is parented to truck.root - position IS local coordinates
-                localX = item.mesh.position.x;
-                localZ = item.mesh.position.z;
-                localY = item.mesh.position.y;
-            } else {
-                const worldVec = new BABYLON.Vector3(item.mesh.position.x, item.mesh.position.y, item.mesh.position.z);
-                const localVec = BABYLON.Vector3.TransformCoordinates(worldVec, invMatrix);
-                localX = localVec.x;
-                localZ = localVec.z;
-                localY = localVec.y;
-            }
-
-            // Update stored position
-            item.localX = localX;
-            item.localZ = localZ;
-            item.localY = localY;
-
-            const overBedFootprint =
-                Math.abs(localX) <= this.cargoWidth / 2 + halfX * 0.5 &&
-                localZ >= -this.cargoLength / 2 - halfZ * 0.5 &&
-                localZ <= this.cargoLength / 2 + halfZ * 0.5;
-            const overCargoFootprint =
-                Math.abs(localX) <= this.cargoWidth / 2 + halfX &&
-                localZ >= -this.cargoLength / 2 - halfZ &&
-                localZ <= this.cargoLength / 2 + halfZ;
-
-            const itemBottomY = item.mesh.position.y - halfY;
-            const floorPenetration = this.floorTopY - itemBottomY;
-
-            if (!item.isParented && overBedFootprint && floorPenetration > floorCorrectionTolerance) {
-                const correctedY = item.mesh.position.y + floorPenetration + 0.02;
-                item.mesh.position.y = correctedY;
-                item.localY = correctedY;
-
-                if (body) {
-                    const quat = item.mesh.rotationQuaternion || BABYLON.Quaternion.Identity();
-                    this.teleportItemBody(
-                        item,
-                        body,
-                        new BABYLON.Vector3(item.mesh.position.x, correctedY, item.mesh.position.z),
-                        quat,
-                        nowMs
-                    );
-                }
-
-                console.warn(`⬇️ FLOOR BREACH: ${item.id || item.mesh.name}`,
-                    `bottom=${itemBottomY.toFixed(2)} < floor=${this.floorTopY.toFixed(2)}`,
-                    `moving y to ${correctedY.toFixed(2)}`
-                );
-            }
-
-            if (body && overCargoFootprint && body.getLinearVelocity && body.setLinearVelocity) {
-                const vel = body.getLinearVelocity();
-                if (vel) {
-                    const restingCenterY = this.floorTopY + halfY;
-                    const nearBedSurface = localY <= restingCenterY + 0.22;
-                    let guardedY = null;
-
-                    if (nearBedSurface && vel.y > 0.05) {
-                        guardedY = Math.min(vel.y * 0.25, 0.14);
-                    } else if (vel.y > 0.35) {
-                        guardedY = 0.35;
-                    }
-
-                    if (guardedY !== null) {
-                        body.setLinearVelocity(new BABYLON.Vector3(vel.x, guardedY, vel.z));
-                    }
-                }
-            }
-
-            if (body && overCargoFootprint && body.getAngularVelocity && body.setAngularVelocity) {
-                const angVel = body.getAngularVelocity();
-                if (angVel) {
-                    const angSpeed = Math.sqrt(angVel.x * angVel.x + angVel.y * angVel.y + angVel.z * angVel.z);
-                    const angularLimit = 5.2;
-                    if (angSpeed > angularLimit) {
-                        const scale = angularLimit / angSpeed;
-                        body.setAngularVelocity(new BABYLON.Vector3(
-                            angVel.x * scale,
-                            angVel.y * scale,
-                            angVel.z * scale
-                        ));
-                    }
-                }
-            }
-
-            if (item.isParented && item.mesh.parent === this.root) {
-                const wayOutsideParented =
-                    Math.abs(localX) > outerHalfX + halfX ||
-                    localZ < outerFrontZ - halfZ ||
-                    localZ > outerBackZ + halfZ;
-                if (wayOutsideParented && !item.isFallen) {
-                    console.warn(`🚨 PARENTED ITEM OUTSIDE BOUNDS: ${item.id || item.mesh.name}`);
-                    item.isFallen = true;
-                }
-                continue;
-            }
-            
-            // Mark as fallen if WAY outside bounds
-            const wayOutside = 
-                Math.abs(localX) > outerHalfX + halfX ||
-                localZ < outerFrontZ - halfZ ||
-                localZ > outerBackZ + halfZ ||
-                item.mesh.position.y < floorY;
-            
-            if (wayOutside && !item.isFallen) {
-                item.isFallen = true;
-                console.error(`💀 ITEM FELL: ${item.id || item.mesh.name}`,
-                    `local(${localX.toFixed(2)}, ${localZ.toFixed(2)})`,
-                    `y=${item.mesh.position.y.toFixed(2)}`,
-                    `limits: X±${outerHalfX.toFixed(1)}, Z[${outerFrontZ.toFixed(1)},${outerBackZ.toFixed(1)}]`
-                );
-            }
+            // Project the actual rotated box into the tilted bed's coordinates.
+            // A chair on its side is still cargo, not an item below the floor.
+            const corners = item.mesh.getBoundingInfo().boundingBox.vectorsWorld.map(
+                point => BABYLON.Vector3.TransformCoordinates(point, inverse)
+            );
+            const minX = Math.min(...corners.map(point => point.x));
+            const maxX = Math.max(...corners.map(point => point.x));
+            const minZ = Math.min(...corners.map(point => point.z));
+            const maxZ = Math.max(...corners.map(point => point.z));
+            const maxY = Math.max(...corners.map(point => point.y));
+            item.isFallen = maxY < this.floorTopY - 0.3 ||
+                minX > this.cargoWidth / 2 + 0.4 || maxX < -this.cargoWidth / 2 - 0.4 ||
+                minZ > this.cargoLength / 2 + 0.4 || maxZ < -this.cargoLength / 2 - 0.4;
         }
     }
-    
-    // Legacy method kept for compatibility - no longer needed with pure Havok physics
-    updateLoadedItemsLegacy(dt, moveX, moveZ, rotationDelta) {
-        const isMoving = Math.abs(this.speed) > 0.01 || this.keys.w || this.keys.s || this.keys.a || this.keys.d;
-        // IMPORTANT: Negate rotation for Babylon.js convention
-        const cos = Math.cos(-this.rotation);
-        const sin = Math.sin(-this.rotation);
-        
-        for (let i = 0; i < this.loadedItems.length; i++) {
-            const item = this.loadedItems[i];
-            if (!item.mesh || item.isFallen) continue;
-            
-            // Update local position from physics
-            if (item.mesh.physicsAggregate) {
-                const dx = item.mesh.position.x - this.position.x;
-                const dz = item.mesh.position.z - this.position.z;
-                item.localX = dx * cos + dz * sin;   // Correct world-to-local
-                item.localZ = -dx * sin + dz * cos;  // Correct world-to-local
-                item.localY = item.mesh.position.y;
-                
-                // Bounds checking - only intervene if item is WAY outside bounds (fallen out)
-                const itemHalfX = item.size ? item.size.x / 2 : 0.25;
-                const itemHalfZ = item.size ? item.size.z / 2 : 0.25;
-                const maxX = this.cargoWidth / 2 + 0.5; // Allow some overhang
-                const maxZ = this.cargoLength / 2 + 0.5;
-                const minZ = -this.cargoLength / 2 - 0.5;
-                
-                // Only mark as fallen if completely outside
-                if (Math.abs(item.localX) > maxX + itemHalfX || 
-                    item.localZ > maxZ + itemHalfZ || 
-                    item.localZ < minZ - itemHalfZ) {
-                    item.isFallen = true;
-                }
-            }
-        }
+
+    resetMotion() {
+        this.speed = 0;
+        this.prevSpeed = 0;
+        this.currentAcceleration = 0;
+        this.currentGear = 0;
+        this.gearJustChanged = false;
+        this.autoBrakeTimer = 0;
+        this.turnInput = 0;
+        this.turnRate = 0;
+        this.currentSteerAngle = 0;
+        this.suspensionPitch = 0;
+        this.suspensionRoll = 0;
+        this.suspensionPitchVel = 0;
+        this.suspensionRollVel = 0;
+        this._truckWorldVelX = 0;
+        this._truckWorldVelZ = 0;
+        this._truckRotationRate = 0;
+        this._truckAngularVelocity = BABYLON.Vector3.Zero();
+        this._collisionCache = null;
+        this.resetDrivingKeys();
+        this.applyTransform(true);
     }
     
     storeInitialPositions() {
@@ -2656,14 +1665,14 @@ class Truck {
         return BABYLON.Quaternion.RotationYawPitchRoll(this.rotation, this.suspensionPitch, this.suspensionRoll);
     }
 
-    applyTransform() {
+    applyTransform(teleport = false) {
         // Update the root node - all meshes are parented so they move together
         this.root.position.x = this.position.x;
         this.root.position.z = this.position.z;
         this.syncRootRotation();
 
         // Sync physics bodies with mesh positions (for kinematic/static bodies)
-        this.syncPhysicsBodies();
+        this.syncPhysicsBodies(teleport);
         
         // Update cargo bounds
         this.updateCargoBounds();
@@ -2687,7 +1696,7 @@ class Truck {
         this.syncRootRotation();
     }
     
-    syncPhysicsBodies() {
+    syncPhysicsBodies(teleport = false) {
         // Update all truck physics bodies to follow the truck
         if (!this.truckPhysicsAggregates) return;
         if (!this.root) return;
@@ -2703,11 +1712,6 @@ class Truck {
             this._physicsRotQuat = BABYLON.Quaternion.Identity();
         }
         BABYLON.Quaternion.RotationYawPitchRollToRef(this.rotation, this.suspensionPitch, this.suspensionRoll, this._physicsRotQuat);
-        
-        // Cache target position vector
-        if (!this._physicsTargetPos) {
-            this._physicsTargetPos = new BABYLON.Vector3();
-        }
         
         // Periodic sync logging for debugging
         const nowMs = performance.now();
@@ -2743,22 +1747,28 @@ class Truck {
             mesh.rotationQuaternion.copyFrom(this._physicsRotQuat);
             mesh.computeWorldMatrix(true);
             
-            // IMPORTANT: For moving bodies, set the target transform on the physics body
-            this._physicsTargetPos.set(worldVec.x, worldVec.y, worldVec.z);
-            aggregate.body.setTargetTransform(this._physicsTargetPos, this._physicsRotQuat);
+            // ACTION derives contact velocity from the next fixed-step target.
+            aggregate.body.setPrestepType(teleport
+                ? BABYLON.PhysicsPrestepType.TELEPORT
+                : BABYLON.PhysicsPrestepType.ACTION);
+            if (teleport) {
+                aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
+                aggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
+                this.scene.getPhysicsEngine().getPhysicsPlugin().setPhysicsBodyTransformation(aggregate.body, mesh);
+            }
         }
     }
     
     initPhysics() {
         // Create physics floor and walls for truck cargo area
         if (!this.truckFloorMesh) {
-            const wallHeight = this.cargoHeight + 1.5; // Extra height to prevent items flying over
+            const wallHeight = this.cargoHeight - 0.1; // Match the visible bed walls
             
-            // EXTREMELY THICK walls - even at 10 m/s, item needs multiple frames to pass through
-            // At 60fps, 10 m/s = 0.167m per frame. 2m walls = 12 frames minimum to pass through
-            const sideWallThickness = 2.0;  // 2m thick side walls
-            const frontWallThickness = 2.0; // 2m thick front wall
-            const backWallThickness = 2.0;  // 2m thick rear wall
+            // Fixed substeps allow narrow colliders without invisible ledges
+            // extending meters beyond the truck.
+            const sideWallThickness = 0.2;
+            const frontWallThickness = 0.2;
+            const backWallThickness = 0.2;
             const wallFloorOverlap = 0.15;
             
             // Floor extends the full bed length; rear containment is handled by the back wall.
@@ -2869,7 +1879,7 @@ class Truck {
             // Create moving truck bodies. Contact friction now handles cargo
             // motion; cargo is not pinned or orientation-locked in physics mode.
             const physicsParts = [
-                { mesh: this.truckFloorMesh, friction: 3.4, restitution: 0.0 },
+                { mesh: this.truckFloorMesh, friction: 0.85, restitution: 0.0 },
                 { mesh: this.truckLeftWallMesh, friction: 0.02, restitution: 0.0 },
                 { mesh: this.truckRightWallMesh, friction: 0.02, restitution: 0.0 },
                 { mesh: this.truckFrontWallMesh, friction: 0.02, restitution: 0.0 },
@@ -2948,11 +1958,6 @@ class Truck {
                 this.truckPhysicsAggregates.push({ mesh, aggregate });
             });
 
-            if (!this._physicsSyncObserver) {
-                this._physicsSyncObserver = this.scene.onBeforePhysicsObservable.add(() => {
-                    this.syncPhysicsBodies();
-                });
-            }
         }
     }
     
