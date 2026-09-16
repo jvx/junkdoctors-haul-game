@@ -13,10 +13,11 @@ const browser = await chromium.launch({
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
+page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
 
 try {
     await page.goto(baseUrl + '/?lvl=2&physics=1&pickup=truck&test=1');
-    await page.waitForFunction(() => window.game?.isRunning, { timeout: 60000 });
+    await page.waitForFunction(() => window.game?.isRunning, null, { timeout: 60000 });
     await page.waitForTimeout(1800);
     const metrics = await page.evaluate(() => {
         const game = window.game;
@@ -91,6 +92,7 @@ try {
             distance: -truck.position.z,
             slide: Math.hypot(drive.at(-1).x - drive[0].x, drive.at(-1).z - drive[0].z),
             maxTilt: Math.max(...drive.map(s => s.tilt)),
+            maxUpwardSpeed: Math.max(...drive.map(s => s.vy)),
             fallen: chair.isFallen,
             pitch: truck.suspensionPitch
         };
@@ -98,9 +100,11 @@ try {
         advance(2);
         result.coasting = { beforeMph: -coastStart, afterMph: -truck.speed };
         const stopStart = truck.position.z;
+        const cargoStopStart = sample(chair);
         const brake = advance(3, { space: true }, 60, chair);
         result.braking = {
             distance: Math.abs(truck.position.z - stopStart),
+            cargoTravel: Math.hypot(brake.at(-1).x - cargoStopStart.x, brake.at(-1).z - cargoStopStart.z),
             stopped: truck.speed === 0,
             maxTilt: Math.max(...brake.map(s => s.tilt)),
             maxUpwardSpeed: Math.max(...brake.map(s => s.vy)),
@@ -131,8 +135,33 @@ try {
             advance(1, { w: true, a: true }, fps);
             result.frameRates.push({ fps, speed: truck.speed, x: truck.position.x, z: truck.position.z, cargo: sample(chair) });
         }
-        result.leftTurn = truck.position.x < 0;
-        result.leftTurnRoll = truck.suspensionRoll;
+        result.steering = [];
+        for (const reverse of [false, true]) {
+            for (const key of ['a', 'd']) {
+                reset();
+                const camera = game.sceneManager.camera;
+                game.scene.stopAnimation(camera);
+                camera.setTarget(truck.position.clone());
+                camera.alpha = Math.PI / 2;
+                camera.beta = 0.6;
+                const view = camera.getViewMatrix(true).clone();
+                advance(1, { [reverse ? 's' : 'w']: true, [key]: true });
+                const nose = new BABYLON.Vector3(-Math.sin(truck.rotation), 0, -Math.cos(truck.rotation));
+                result.steering.push({
+                    key, reverse,
+                    screenDirection: BABYLON.Vector3.TransformNormal(nose, view).x,
+                    roll: truck.suspensionRoll,
+                    steerAngle: truck.currentSteerAngle
+                });
+            }
+        }
+        reset();
+        advance(1, { w: true });
+        result.quickAcceleration = -truck.speed;
+        reset();
+        truck.speed = -21;
+        advance(0.6, { space: true, a: true });
+        result.quickStop = { speed: truck.speed, distance: truck.position.length(), yaw: truck.rotation };
         reset();
         advance(3, { s: true });
         result.reverse = { speed: truck.speed, z: truck.position.z };
@@ -206,13 +235,16 @@ try {
     assert(metrics.idle.travel < 0.05);
     assert(metrics.idle.maxTilt < 3);
     assert(metrics.idle.bounce < 0.03);
-    assert(metrics.acceleration.mph > 15 && metrics.acceleration.mph < 30);
+    assert(metrics.acceleration.mph > 40 && metrics.acceleration.mph < 55);
     assert(metrics.acceleration.pitch > 0); // Nose rises under throttle.
-    assert(metrics.acceleration.slide < 0.2);
+    assert(metrics.acceleration.slide > 0.2 && metrics.acceleration.slide < 1);
+    assert(metrics.acceleration.maxTilt > 45); // Unsecured tall cargo can tip under hard throttle.
+    assert(metrics.acceleration.maxUpwardSpeed < 2);
     assert(!metrics.acceleration.fallen);
     assert(metrics.coasting.afterMph > metrics.coasting.beforeMph * 0.85);
     assert(metrics.braking.stopped);
     assert(metrics.braking.distance > 2 && metrics.braking.distance < 15);
+    assert(metrics.braking.cargoTravel > 0.2);
     assert(metrics.braking.maxUpwardSpeed < 3);
     assert(metrics.braking.maxTilt > 45);
     assert(!metrics.braking.fallen);
@@ -224,11 +256,21 @@ try {
     for (const state of metrics.frameRates.slice(1)) {
         assert(Math.hypot(state.x - baseline.x, state.z - baseline.z) < 0.2);
         assert(Math.abs(state.speed - baseline.speed) < 0.1);
+        assert(Math.hypot(state.cargo.x - baseline.cargo.x, state.cargo.z - baseline.cargo.z) < 0.05);
+        assert(Math.abs(state.cargo.tilt - baseline.cargo.tilt) < 1);
     }
-    assert(metrics.leftTurn);
-    assert(metrics.leftTurnRoll < 0); // Body leans right in a left turn.
+    for (const turn of metrics.steering) {
+        const expectedSign = (turn.key === 'a' ? -1 : 1) * (turn.reverse ? -1 : 1);
+        assert(turn.screenDirection * expectedSign > 0.05, JSON.stringify(turn));
+        assert(turn.steerAngle * (turn.key === 'a' ? -1 : 1) > 0);
+        if (!turn.reverse) assert(turn.roll * (turn.key === 'a' ? 1 : -1) > 0);
+    }
+    assert(metrics.quickAcceleration > 11 && metrics.quickAcceleration < 12);
+    assert.equal(metrics.quickStop.speed, 0);
+    assert(metrics.quickStop.distance < 3);
+    assert(metrics.quickStop.yaw < -0.05); // Braking must not cancel left steering.
     assert(metrics.reverse.speed > 0 && metrics.reverse.speed <= 12);
-    assert(metrics.reverse.z > 0 && metrics.reverse.yaw < 0);
+    assert(metrics.reverse.z > 0 && metrics.reverse.yaw > 0);
     assert(metrics.cornering <= 0.7 * 9.81 + 0.1);
     assert(metrics.highway.speed > 64 && metrics.highway.speed <= 65);
     assert.equal(metrics.highway.gear, 5);
@@ -246,8 +288,9 @@ try {
     console.log('Physics regression checks passed.');
 
     // Exercise the real UI and keyboard handlers on a fresh level.
-    await page.goto(baseUrl + '/?lvl=2&physics=1&pickup=truck&test=1');
-    await page.waitForFunction(() => window.game?.isRunning, { timeout: 60000 });
+    await page.goto(baseUrl + '/?lvl=2&pickup=truck&test=1');
+    await page.waitForFunction(() => window.game?.isRunning, null, { timeout: 60000 });
+    assert(await page.evaluate(() => game.physicsEnabled), 'Cargo physics must default to enabled');
     await page.waitForTimeout(1800);
     await page.evaluate(() => {
         window.advanceTime(0);
@@ -307,6 +350,37 @@ try {
     assert.equal(await page.evaluate(() => game.truck.loadedItems.length), 0);
     assert.equal(await page.evaluate(() => game.truck.speed), 0);
 
+    for (const key of ['a', 'd']) {
+        const view = await page.evaluate(() => {
+            game.resetLevel();
+            // Render newly generated restart geometry before advancing a full second.
+            window.advanceTime(0);
+            const camera = game.sceneManager.camera;
+            game.scene.stopAnimation(camera);
+            camera.setTarget(game.truck.position.clone());
+            camera.alpha = Math.PI / 2;
+            return camera.getViewMatrix(true).asArray();
+        });
+        await page.keyboard.down('w');
+        await page.keyboard.down(key);
+        assert(await page.evaluate(key => game.truck.keys.w && game.truck.keys[key], key));
+        await page.evaluate(() => window.advanceTime(1000));
+        const direction = await page.evaluate(matrix => {
+            const yaw = game.truck.rotation;
+            return BABYLON.Vector3.TransformNormal(
+                new BABYLON.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)),
+                BABYLON.Matrix.FromArray(matrix)
+            ).x;
+        }, view);
+        assert(direction * (key === 'a' ? -1 : 1) > 0.05,
+            `Keyboard ${key} must steer correctly on screen: ${direction}; ${await page.evaluate(() => window.render_game_to_text())}`);
+        await page.keyboard.up(key);
+        await page.keyboard.up('w');
+        assert.equal(await page.evaluate(() => game.truck.keys.a || game.truck.keys.d || game.truck.keys.w), false);
+        await page.screenshot({ path: path.join(output, `desktop-steer-${key}.png`) });
+    }
+    await page.evaluate(() => game.resetLevel());
+
     // Mobile uses the same driving model through the existing touch joystick.
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => game.handleResize(true));
@@ -321,6 +395,17 @@ try {
     assert(await page.evaluate(() => game.truck.speed < 0));
     await page.mouse.up();
     assert.equal(await page.evaluate(() => game.truck.keys.w), false);
+    for (const key of ['a', 'd']) {
+        await page.evaluate(() => game.resetLevel());
+        const x = joystickRect.x + joystickRect.width * (key === 'a' ? 0.15 : 0.85);
+        await page.mouse.move(x, joystickRect.y + joystickRect.height * 0.15);
+        await page.mouse.down();
+        assert(await page.evaluate(key => game.truck.keys[key] && game.truck.keys.w, key));
+        await page.evaluate(() => window.advanceTime(1000));
+        assert(await page.evaluate(key => game.truck.currentSteerAngle * (key === 'a' ? -1 : 1) > 0, key));
+        await page.mouse.up();
+        assert.equal(await page.evaluate(() => game.truck.keys.a || game.truck.keys.d || game.truck.keys.w), false);
+    }
     await page.screenshot({ path: path.join(output, 'mobile.png') });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
 
@@ -359,12 +444,15 @@ try {
     assert(await page.locator('#gameover-modal').isVisible());
 
     // Verify real requestAnimationFrame/Havok integration without manual stepping.
-    await page.goto(baseUrl + '/?lvl=1&physics=1&pickup=truck');
-    await page.waitForFunction(() => window.game?.isRunning, { timeout: 60000 });
-    await page.keyboard.down('w');
-    await page.waitForFunction(() => game.truck.position.z < -0.1, { timeout: 15000 });
-    await page.keyboard.up('w');
-    assert(await page.evaluate(() => game.truck.speed < 0));
+    for (const physics of [true, false]) {
+        await page.goto(baseUrl + '/?lvl=1&pickup=truck' + (physics ? '' : '&physics=0'));
+        await page.waitForFunction(() => window.game?.isRunning, null, { timeout: 60000 });
+        assert.equal(await page.evaluate(() => game.physicsEnabled), physics);
+        await page.keyboard.down('w');
+        await page.waitForFunction(() => game.truck.position.z < -0.1, null, { timeout: 15000 });
+        await page.keyboard.up('w');
+        assert(await page.evaluate(() => game.truck.speed < 0));
+    }
     assert.equal(errors.length, 0, errors.join('\n'));
     console.log('UI, keyboard, mobile joystick, rendering, delivery/loss, and normal render-loop checks passed.');
 } finally {

@@ -264,7 +264,7 @@ class Game {
     getUrlPhysicsEnabled() {
         const params = new URLSearchParams(window.location.search);
         const hasPhysicsParam = params.has('physics') || params.has('phys');
-        if (!hasPhysicsParam) return false;
+        if (!hasPhysicsParam) return true;
 
         const rawValue = params.has('physics') ? params.get('physics') : params.get('phys');
         const normalized = (rawValue || '1').trim().toLowerCase();

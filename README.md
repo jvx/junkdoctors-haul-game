@@ -17,8 +17,8 @@ Then open `http://localhost:8000/`.
 URL params can be combined for faster playtesting:
 
 - `?lvl=2` starts a specific level automatically. Valid levels start at `1`; values above `99` are clamped to `99`. Level-started test sessions skip leaderboard score submission.
-- `?physics=1` starts with Havok physics mode on. Accepted on values: `1`, `true`, `on`, `yes`, `havok`. Alias: `phys`.
-- `?physics=0` explicitly keeps physics mode off. Accepted off values: `0`, `false`, `off`, `no`.
+- Havok cargo physics is on by default. `?physics=1` explicitly enables it. Accepted on values: `1`, `true`, `on`, `yes`, `havok`. Alias: `phys`.
+- `?physics=0` disables cargo physics. Accepted off values: `0`, `false`, `off`, `no`.
 - `?pickup=truck` spawns pickup items beside the truck and keeps pickup mode active so you can test loading without driving to the pickup marker. Aliases: `pickupItems` or `items`; accepted on values include `1`, `true`, `on`, `yes`, `truck`, `near`, `nearby`, `near-truck`.
 
 Examples:
@@ -47,8 +47,8 @@ git diff --check
 ```
 
 The suite checks parked and moving placement, acceleration/coasting/braking,
-payload effects, steering, collisions, tipping, stacking, pause/restart, physics
-off, delivery completion, and the actual loading/keyboard/mobile UI. It compares
+payload effects, camera-relative steering, collisions, tipping, stacking,
+pause/restart, physics off, delivery completion, and the actual loading/keyboard/mobile UI. It compares
 30/60/144 FPS simulation results and saves metrics/screenshots in `output/physics/`.
 Set `GAME_URL` for another local server and `PLAYWRIGHT_MODULE` when using an
 existing Playwright installation outside the repository.
@@ -146,13 +146,14 @@ The player-controlled truck with:
 - Front-wheel bicycle steering around the rear axle, limited by tire grip
 - 5-speed automatic transmission
 - Gear-dependent acceleration, payload mass, rolling resistance, and air drag
-- Braking uses about 0.64 g unloaded; cornering shares the available tire grip
+- Responsive truck controls: up to 12 mph/s acceleration and 40 mph/s braking unloaded
+- Speed-limited steering stays responsive while braking; cargo uses physical sliding/tumbling contacts
 - Collision detection with buildings/walls and suspension weight transfer
 
 **Cargo System:**
 - Cargo bed bounds tracking
 - Loaded items management
-- In physics mode, dynamic Havok bodies handle friction, stacking, sliding,
+- By default, dynamic Havok bodies handle friction, stacking, sliding,
   tipping, and impacts without pose locks or per-frame velocity clamps
 - Simplified box collision shapes remain; the truck follows a road-plane
   vehicle model rather than a full wheel/suspension rigid-body simulation
