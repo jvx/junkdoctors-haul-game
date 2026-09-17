@@ -82,6 +82,15 @@ class Game {
             this.sceneManager = new SceneManager(this.engine, this.canvas);
             this.scene = await this.sceneManager.createScene();
             this.initPhysicsPerfObservers();
+            this.scene.onBeforeRenderObservable.add(() => {
+                if (!this.isRunning) return;
+                // Babylon has finished this frame's physics before this observer.
+                const cameraStart = this.enablePerfStats ? performance.now() : 0;
+                this.sceneManager.updateCameraFollow();
+                if (this.enablePerfStats && this._perfStats) {
+                    this._perfStats.cameraMs += performance.now() - cameraStart;
+                }
+            });
             
             // Init audio
             this.audioManager.init();
@@ -180,11 +189,6 @@ class Game {
                             this._loggedRunning = true;
                         }
 
-                        // Update view once per frame
-                        const cameraStart = perfEnabled ? performance.now() : 0;
-                        this.sceneManager.updateCameraFollow();
-                        if (perfEnabled) this._perfStats.cameraMs += performance.now() - cameraStart;
-
                         const groundStart = perfEnabled ? performance.now() : 0;
                         this.sceneManager.updateInfiniteGround(this.truck.position.x, this.truck.position.z);
                         if (perfEnabled) this._perfStats.groundMs += performance.now() - groundStart;
@@ -195,7 +199,7 @@ class Game {
                         this.update();
                         if (perfEnabled) this._perfStats.updateMs += performance.now() - updateStart;
                     }
-                    // Apply interpolated transform before render (visuals only)
+                    // Physics advances during render; the camera follows afterward.
                     const renderStart = perfEnabled ? performance.now() : 0;
                     this.scene.render();
                     if (perfEnabled) this._perfStats.renderMs += performance.now() - renderStart;

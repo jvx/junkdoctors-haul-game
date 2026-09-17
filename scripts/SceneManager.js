@@ -9,7 +9,7 @@ class SceneManager {
         this.camera = null;
         this.shadowGenerator = null;
         this.followTarget = null; // Target to follow (truck)
-        this.cameraAngleOffset = 0; // Legacy
+        this.cameraAngleOffset = 0; // Smoothed manual look, independent of truck heading
         this.keyAngleOffset = 0; // Arrow key horizontal offset
         this.mouseAngleOffset = 0; // Mouse drag horizontal offset
         this.touchAngleOffset = 0; // Touch joystick horizontal offset
@@ -126,9 +126,9 @@ class SceneManager {
         });
     }
     
-    updateCameraLook() {
-        const rotateSpeed = 0.03;
-        const returnSpeed = 0.05;
+    updateCameraLook(deltaTime = 1 / 60) {
+        const rotateSpeed = 1.8 * deltaTime;
+        const returnSpeed = 1 - Math.pow(0.95, deltaTime * 60);
         const maxAlphaOffset = Math.PI * 0.8; // Max ~145 degrees look around horizontally
         const maxBetaOffset = 0.5; // Max vertical offset
         
@@ -285,6 +285,7 @@ class SceneManager {
     // Animate camera from title view to gameplay view
     animateToGameplay(duration = 1500) {
         this.isTitleView = false;
+        this.cameraAngleOffset = 0;
         
         const fps = 60;
         const frames = duration / 1000 * fps;
@@ -2575,11 +2576,12 @@ class SceneManager {
         this.targetCameraAlpha = this.camera.alpha; // Store initial camera alpha
     }
     
-    updateCameraFollow(alpha = 1) {
+    updateCameraFollow(deltaTime = this.engine.getDeltaTime() / 1000) {
         if (!this.followTarget || !this.camera || !this.cameraFollowEnabled) return;
+        const dt = Math.max(0, Math.min(deltaTime, 0.1));
         
         // Update manual look-around (arrow keys)
-        this.updateCameraLook();
+        this.updateCameraLook(dt);
         
         const truck = this.followTarget;
         
@@ -2598,19 +2600,18 @@ class SceneManager {
         // Smoothly apply vertical offset (beta) - keep smooth for manual look
         const baseBeta = this.gameplayCameraSettings.beta;
         const desiredBeta = baseBeta + this.cameraBetaOffset + this.touchBetaOffset;
-        const betaSmoothing = 0.12;
+        const betaSmoothing = 1 - Math.exp(-8 * dt);
         this.camera.beta += (desiredBeta - this.camera.beta) * betaSmoothing;
         
-        // Desired angle = base + manual offset (keys + mouse + touch)
-        const desiredAlpha = baseAlpha + this.keyAngleOffset + this.mouseAngleOffset + this.touchAngleOffset;
-        
-        // Smoothly rotate camera angle (only for manual look-around, not for following)
-        const rotSmoothing = 0.08;
-        let alphaDiff = desiredAlpha - this.camera.alpha;
+        // Follow heading immediately. Only player look-around gets smoothing.
+        const desiredOffset = this.keyAngleOffset + this.mouseAngleOffset + this.touchAngleOffset;
+        const rotSmoothing = 1 - Math.exp(-12 * dt);
+        let alphaDiff = desiredOffset - this.cameraAngleOffset;
         while (alphaDiff > Math.PI) alphaDiff -= Math.PI * 2;
         while (alphaDiff < -Math.PI) alphaDiff += Math.PI * 2;
         
-        this.camera.alpha += alphaDiff * rotSmoothing;
+        this.cameraAngleOffset += alphaDiff * rotSmoothing;
+        this.camera.alpha = baseAlpha + this.cameraAngleOffset;
     }
     
     debugMeshes() {}

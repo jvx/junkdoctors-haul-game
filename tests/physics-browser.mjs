@@ -163,6 +163,14 @@ try {
         advance(0.6, { space: true, a: true });
         result.quickStop = { speed: truck.speed, distance: truck.position.length(), yaw: truck.rotation };
         reset();
+        advance(0.1, { a: true });
+        result.steeringResponse = { attack: -truck.turnInput, parkedYaw: truck.rotation };
+        advance(0.1);
+        result.steeringResponse.released = Math.abs(truck.turnInput);
+        advance(0.25, { a: true });
+        advance(0.05, { d: true });
+        result.steeringResponse.reversed = truck.turnInput;
+        reset();
         advance(3, { s: true });
         result.reverse = { speed: truck.speed, z: truck.position.z };
         advance(1, { s: true, a: true });
@@ -170,7 +178,7 @@ try {
         reset();
         truck.speed = -50;
         advance(1, { a: true });
-        result.cornering = Math.abs(truck.speed * 0.44704 * truck.turnRate);
+        result.cornering = { yawRate: Math.abs(truck.turnRate), yaw: Math.abs(truck.rotation) };
         reset();
         advance(100, { w: true }, 30);
         result.highway = { speed: -truck.speed, gear: truck.currentGear };
@@ -220,6 +228,35 @@ try {
         advance(2);
         advance(3, { w: true });
         result.table = sample(table);
+
+        const sm = game.sceneManager;
+        game.scene.stopAnimation(sm.camera);
+        sm.cameraFollowEnabled = true;
+        const resetLook = () => {
+            sm.cameraAngleOffset = sm.keyAngleOffset = sm.mouseAngleOffset = sm.touchAngleOffset = 0;
+            sm.cameraBetaOffset = sm.touchBetaOffset = 0;
+            sm.isMouseLooking = sm.isTouchLooking = false;
+            sm.cameraKeys = { left: false, right: false, up: false, down: false };
+        };
+        result.cameraRates = [];
+        for (const fps of [30, 60, 144]) {
+            resetLook();
+            sm.cameraKeys.left = true;
+            for (let i = 0; i < fps; i++) sm.updateCameraFollow(1 / fps);
+            const heldOffset = sm.cameraAngleOffset;
+            sm.cameraKeys.left = false;
+            for (let i = 0; i < fps; i++) sm.updateCameraFollow(1 / fps);
+            result.cameraRates.push({ fps, heldOffset, releasedOffset: sm.cameraAngleOffset });
+        }
+        resetLook();
+        const previousYaw = truck.rotation;
+        result.cameraHeadingErrors = [];
+        for (const yaw of [0, 1, Math.PI + 0.1, -Math.PI - 0.1]) {
+            truck.rotation = yaw;
+            sm.updateCameraFollow(1 / 60);
+            result.cameraHeadingErrors.push(Math.abs(sm.camera.alpha + yaw - Math.PI / 2));
+        }
+        truck.rotation = previousYaw;
         game.scene.stopAnimation(game.sceneManager.camera);
         game.sceneManager.camera.beta = 0.6;
         game.sceneManager.camera.alpha = Math.PI / 2;
@@ -253,6 +290,8 @@ try {
     assert(metrics.movingPlacement.maxUpwardSpeed < 1);
     assert(metrics.payload.loadedSpeed < metrics.payload.emptySpeed * 0.85);
     const baseline = metrics.frameRates[0];
+    assert(!baseline.cargo.fallen);
+    assert(Math.abs(baseline.cargo.x) > 0.3 && Math.abs(baseline.cargo.x) < 1.2);
     for (const state of metrics.frameRates.slice(1)) {
         assert(Math.hypot(state.x - baseline.x, state.z - baseline.z) < 0.2);
         assert(Math.abs(state.speed - baseline.speed) < 0.1);
@@ -269,9 +308,20 @@ try {
     assert.equal(metrics.quickStop.speed, 0);
     assert(metrics.quickStop.distance < 3);
     assert(metrics.quickStop.yaw < -0.05); // Braking must not cancel left steering.
+    assert(metrics.steeringResponse.attack > 0.9);
+    assert(metrics.steeringResponse.released < 0.1);
+    assert(metrics.steeringResponse.reversed > 0.3);
+    assert.equal(metrics.steeringResponse.parkedYaw, 0);
     assert(metrics.reverse.speed > 0 && metrics.reverse.speed <= 12);
     assert(metrics.reverse.z > 0 && metrics.reverse.yaw > 0);
-    assert(metrics.cornering <= 0.7 * 9.81 + 0.1);
+    assert(metrics.cornering.yawRate > 1 && metrics.cornering.yawRate <= 1.1 + 1e-6);
+    assert(metrics.cornering.yaw > 1 && metrics.cornering.yaw < 1.1);
+    for (const camera of metrics.cameraRates) {
+        assert(camera.heldOffset > 1.5 && camera.releasedOffset < 0.15);
+        assert(Math.abs(camera.heldOffset - metrics.cameraRates[0].heldOffset) < 0.04);
+        assert(Math.abs(camera.releasedOffset - metrics.cameraRates[0].releasedOffset) < 0.02);
+    }
+    assert(metrics.cameraHeadingErrors.every(error => error < 1e-6));
     assert(metrics.highway.speed > 64 && metrics.highway.speed <= 65);
     assert.equal(metrics.highway.gear, 5);
     assert.equal(metrics.pause.truck, 0);
@@ -446,12 +496,33 @@ try {
     // Verify real requestAnimationFrame/Havok integration without manual stepping.
     for (const physics of [true, false]) {
         await page.goto(baseUrl + '/?lvl=1&pickup=truck' + (physics ? '' : '&physics=0'));
-        await page.waitForFunction(() => window.game?.isRunning, null, { timeout: 60000 });
+        await page.waitForFunction(() => window.game?.isRunning && game.sceneManager.cameraFollowEnabled,
+            null, { timeout: 60000 });
         assert.equal(await page.evaluate(() => game.physicsEnabled), physics);
+        await page.evaluate(() => {
+            window.cameraFrameProbe = { count: 0, moving: 0, maxPositionLag: 0, maxYawLag: 0 };
+            game.scene.onAfterRenderObservable.add(() => {
+                const probe = window.cameraFrameProbe;
+                const camera = game.sceneManager.camera;
+                const truck = game.truck;
+                probe.count++;
+                if (Math.abs(truck.speed) > 1) probe.moving++;
+                probe.maxPositionLag = Math.max(probe.maxPositionLag,
+                    Math.hypot(camera.target.x - truck.position.x, camera.target.z - truck.position.z));
+                const yawError = camera.alpha + truck.rotation - Math.PI / 2;
+                probe.maxYawLag = Math.max(probe.maxYawLag, Math.abs(Math.atan2(Math.sin(yawError), Math.cos(yawError))));
+            });
+        });
         await page.keyboard.down('w');
-        await page.waitForFunction(() => game.truck.position.z < -0.1, null, { timeout: 15000 });
+        await page.keyboard.down('a');
+        await page.waitForFunction(() => cameraFrameProbe.count >= 12 && cameraFrameProbe.moving >= 3,
+            null, { timeout: 30000 });
+        await page.keyboard.up('a');
         await page.keyboard.up('w');
-        assert(await page.evaluate(() => game.truck.speed < 0));
+        const camera = await page.evaluate(() => window.cameraFrameProbe);
+        assert(camera.maxPositionLag < 1e-5, JSON.stringify(camera));
+        assert(camera.maxYawLag < 1e-5, JSON.stringify(camera));
+        console.log('Same-frame camera tracking:', JSON.stringify({ physics, ...camera }));
     }
     assert.equal(errors.length, 0, errors.join('\n'));
     console.log('UI, keyboard, mobile joystick, rendering, delivery/loss, and normal render-loop checks passed.');

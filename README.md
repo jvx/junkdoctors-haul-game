@@ -47,7 +47,7 @@ git diff --check
 ```
 
 The suite checks parked and moving placement, acceleration/coasting/braking,
-payload effects, camera-relative steering, collisions, tipping, stacking,
+payload effects, steering response, same-frame camera tracking, collisions, tipping, stacking,
 pause/restart, physics off, delivery completion, and the actual loading/keyboard/mobile UI. It compares
 30/60/144 FPS simulation results and saves metrics/screenshots in `output/physics/`.
 Set `GAME_URL` for another local server and `PLAYWRIGHT_MODULE` when using an
@@ -143,11 +143,14 @@ The player-controlled truck with:
 
 **Driving Physics:**
 - Fixed 120 Hz driving updates synchronized with Havok cargo contacts
-- Front-wheel bicycle steering around the rear axle, limited by tire grip
+- Front-wheel bicycle steering around the rear axle, with a 1.1 rad/s arcade turn-rate cap
+- Steering reaches 90% input in about 0.1 seconds, including quick centering/reversal
+- Camera follows the current physics frame and truck heading without added lag;
+  manual look-around remains smoothed and frame-rate independent
 - 5-speed automatic transmission
 - Gear-dependent acceleration, payload mass, rolling resistance, and air drag
 - Responsive truck controls: up to 12 mph/s acceleration and 40 mph/s braking unloaded
-- Speed-limited steering stays responsive while braking; cargo uses physical sliding/tumbling contacts
+- Steering stays responsive while braking; cargo uses physical sliding/tumbling contacts
 - Collision detection with buildings/walls and suspension weight transfer
 
 **Cargo System:**
