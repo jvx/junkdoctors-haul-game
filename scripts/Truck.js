@@ -29,7 +29,9 @@ class Truck {
         this.brakeDeceleration = 40; // mph/s; responsive game controls, not a truck simulator
         this.rearAxleOffset = 1.8;
         this.wheelbase = 4.8;
-        this.maxSteerAngle = Math.PI / 6;
+        this.maxSteerAngle = 50 * Math.PI / 180;
+        this.steeringResponse = 26; // 90% input within 0.1 seconds, including a physics tick
+        this.maxTurnRate = 1.5; // rad/s; responsive arcade handling at road speed
         this.turnInput = 0;
         this.currentSteerAngle = 0;
         this.currentAcceleration = 0; // For physics effects on items
@@ -1300,12 +1302,11 @@ class Truck {
 
         // In the left-handed follow camera, negative steering turns screen-left.
         const rawSteer = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
-        this.turnInput += (rawSteer - this.turnInput) * (1 - Math.exp(-6 * dt));
+        this.turnInput += (rawSteer - this.turnInput) * (1 - Math.exp(-this.steeringResponse * dt));
         const travelSpeed = (this.speed + this.prevSpeed) * 0.5 * mphToMps;
-        // Limit high-speed cornering without disabling steering under hard braking.
-        const lateralGrip = 0.7 * 9.81;
-        const gripSteerLimit = Math.atan(lateralGrip * this.wheelbase / Math.max(0.01, travelSpeed * travelSpeed));
-        this.currentSteerAngle = this.turnInput * Math.min(this.maxSteerAngle, gripSteerLimit);
+        // Cap yaw speed, not lateral acceleration: road-speed turns should stay useful.
+        const speedSteerLimit = Math.atan(this.maxTurnRate * this.wheelbase / Math.max(0.01, Math.abs(travelSpeed)));
+        this.currentSteerAngle = this.turnInput * Math.min(this.maxSteerAngle, speedSteerLimit);
         this.turnRate = -travelSpeed * Math.tan(this.currentSteerAngle) / this.wheelbase;
         const deltaRotation = this.turnRate * dt;
         const midpointYaw = prevRotation + deltaRotation / 2;

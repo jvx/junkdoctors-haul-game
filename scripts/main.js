@@ -42,7 +42,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 game.scene._advancePhysicsEngineStep(Math.max(0, Math.min(ms, 1000)));
                 game.update();
             }
-            game.sceneManager.updateCameraFollow();
             game.scene.physicsEnabled = false;
             game.scene.render();
         };

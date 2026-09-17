@@ -9,7 +9,7 @@ class SceneManager {
         this.camera = null;
         this.shadowGenerator = null;
         this.followTarget = null; // Target to follow (truck)
-        this.cameraAngleOffset = 0; // Legacy
+        this.cameraAngleOffset = 0; // Smoothed manual look, independent of truck heading
         this.keyAngleOffset = 0; // Arrow key horizontal offset
         this.mouseAngleOffset = 0; // Mouse drag horizontal offset
         this.touchAngleOffset = 0; // Touch joystick horizontal offset
@@ -126,9 +126,9 @@ class SceneManager {
         });
     }
     
-    updateCameraLook() {
-        const rotateSpeed = 0.03;
-        const returnSpeed = 0.05;
+    updateCameraLook(deltaTime = 1 / 60) {
+        const rotateSpeed = 1.8 * deltaTime;
+        const returnSpeed = 1 - Math.pow(0.95, deltaTime * 60);
         const maxAlphaOffset = Math.PI * 0.8; // Max ~145 degrees look around horizontally
         const maxBetaOffset = 0.5; // Max vertical offset
         
@@ -285,6 +285,7 @@ class SceneManager {
     // Animate camera from title view to gameplay view
     animateToGameplay(duration = 1500) {
         this.isTitleView = false;
+        this.cameraAngleOffset = 0;
         
         const fps = 60;
         const frames = duration / 1000 * fps;
@@ -2466,6 +2467,13 @@ class SceneManager {
             }
         });
 
+        // Populate nearby tiles first when idle time is scarce.
+        const tileDistance = (key) => {
+            const [x, z] = key.split('_').map(Number);
+            return (x - currentTileX) ** 2 + (z - currentTileZ) ** 2;
+        };
+        this.pendingHouseTiles.sort((a, b) => tileDistance(a) - tileDistance(b));
+
         // Process house creation off the render loop to avoid frame stutter
         this.scheduleHouseWork(houseNeededTiles, currentTileX, currentTileZ);
 
@@ -2510,28 +2518,26 @@ class SceneManager {
     }
 
     scheduleHouseWork(houseNeededTiles, currentTileX, currentTileZ) {
-        if (this._houseWorkScheduled) return;
+        if (this._houseWorkScheduled || !this.houseStreamingEnabled || !this.pendingHouseTiles.length) return;
         this._houseWorkScheduled = true;
 
         const runner = (deadline) => {
             this._houseWorkScheduled = false;
+            if (!this.houseStreamingEnabled) return;
             const maxMillis = 3; // Budget per idle callback
             const start = performance.now();
-            let created = 0;
             while (this.pendingHouseTiles.length > 0) {
+                // A tile cannot be interrupted: reserve time before starting it.
+                if (performance.now() - start >= maxMillis) break;
+                if (!deadline.didTimeout && deadline.timeRemaining() < maxMillis) break;
                 const tileKey = this.pendingHouseTiles.shift();
                 this.pendingHouseTileSet.delete(tileKey);
                 if (!houseNeededTiles.has(tileKey)) continue;
                 if (this.hasLiveHouses(tileKey)) continue;
                 const [gridX, gridZ] = tileKey.split('_').map(Number);
                 this.createHousesForTile(gridX, gridZ);
-                created++;
-
-                const elapsed = performance.now() - start;
-                const timeLeft = deadline && typeof deadline.timeRemaining === 'function'
-                    ? deadline.timeRemaining()
-                    : maxMillis - elapsed;
-                if (elapsed > maxMillis || timeLeft < 1) break;
+                // Busy browsers still make progress, but never force a batch.
+                if (deadline.didTimeout) break;
             }
 
             if (this.pendingHouseTiles.length > 0) {
@@ -2540,9 +2546,9 @@ class SceneManager {
         };
 
         if (typeof requestIdleCallback === 'function') {
-            requestIdleCallback(runner, { timeout: 16 });
+            requestIdleCallback(runner, { timeout: 100 });
         } else {
-            setTimeout(() => runner({ timeRemaining: () => 0 }), 0);
+            setTimeout(() => runner({ didTimeout: true, timeRemaining: () => 0 }), 16);
         }
     }
     
@@ -2575,11 +2581,12 @@ class SceneManager {
         this.targetCameraAlpha = this.camera.alpha; // Store initial camera alpha
     }
     
-    updateCameraFollow(alpha = 1) {
+    updateCameraFollow(deltaTime = this.engine.getDeltaTime() / 1000) {
         if (!this.followTarget || !this.camera || !this.cameraFollowEnabled) return;
+        const dt = Math.max(0, Math.min(deltaTime, 0.1));
         
         // Update manual look-around (arrow keys)
-        this.updateCameraLook();
+        this.updateCameraLook(dt);
         
         const truck = this.followTarget;
         
@@ -2598,19 +2605,18 @@ class SceneManager {
         // Smoothly apply vertical offset (beta) - keep smooth for manual look
         const baseBeta = this.gameplayCameraSettings.beta;
         const desiredBeta = baseBeta + this.cameraBetaOffset + this.touchBetaOffset;
-        const betaSmoothing = 0.12;
+        const betaSmoothing = 1 - Math.exp(-8 * dt);
         this.camera.beta += (desiredBeta - this.camera.beta) * betaSmoothing;
         
-        // Desired angle = base + manual offset (keys + mouse + touch)
-        const desiredAlpha = baseAlpha + this.keyAngleOffset + this.mouseAngleOffset + this.touchAngleOffset;
-        
-        // Smoothly rotate camera angle (only for manual look-around, not for following)
-        const rotSmoothing = 0.08;
-        let alphaDiff = desiredAlpha - this.camera.alpha;
+        // Follow heading immediately. Only player look-around gets smoothing.
+        const desiredOffset = this.keyAngleOffset + this.mouseAngleOffset + this.touchAngleOffset;
+        const rotSmoothing = 1 - Math.exp(-12 * dt);
+        let alphaDiff = desiredOffset - this.cameraAngleOffset;
         while (alphaDiff > Math.PI) alphaDiff -= Math.PI * 2;
         while (alphaDiff < -Math.PI) alphaDiff += Math.PI * 2;
         
-        this.camera.alpha += alphaDiff * rotSmoothing;
+        this.cameraAngleOffset += alphaDiff * rotSmoothing;
+        this.camera.alpha = baseAlpha + this.cameraAngleOffset;
     }
     
     debugMeshes() {}

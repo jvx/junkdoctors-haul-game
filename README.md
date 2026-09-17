@@ -24,7 +24,7 @@ URL params can be combined for faster playtesting:
 Examples:
 
 - Local level 2 physics-loading test: `http://localhost:8000/?lvl=2&physics=1&pickup=truck`
-- Live level 2 physics-loading test: https://jayremedy.github.io/junkdoctors-haul-game/?lvl=2&physics=1&pickup=truck
+- Live level 2 physics-loading test: https://jvx.github.io/junkdoctors-haul-game/?lvl=2&physics=1&pickup=truck
 - Start screen with physics pre-enabled: `http://localhost:8000/?physics=1`
 
 ### Physics Regression Checks
@@ -41,17 +41,20 @@ python3 -m http.server 8000
 In another terminal, from repo root:
 
 ```bash
+node --test tests/house-streaming.mjs
 node tests/physics-browser.mjs
 for f in scripts/*.js; do node --check "$f"; done
 git diff --check
 ```
 
 The suite checks parked and moving placement, acceleration/coasting/braking,
-payload effects, camera-relative steering, collisions, tipping, stacking,
+payload effects, steering response through 65 mph, same-frame camera tracking, collisions, tipping, stacking,
 pause/restart, physics off, delivery completion, and the actual loading/keyboard/mobile UI. It compares
 30/60/144 FPS simulation results and saves metrics/screenshots in `output/physics/`.
 Set `GAME_URL` for another local server and `PLAYWRIGHT_MODULE` when using an
 existing Playwright installation outside the repository.
+The dependency-free house-streaming tests check idle budgets, busy-frame deferral,
+timeout/fallback progress, and disabled or stale work.
 
 `?test=1` enables manual `window.advanceTime(ms)` stepping for browser tests;
 `window.render_game_to_text()` reports the current state. Test URLs should also
@@ -143,11 +146,15 @@ The player-controlled truck with:
 
 **Driving Physics:**
 - Fixed 120 Hz driving updates synchronized with Havok cargo contacts
-- Front-wheel bicycle steering around the rear axle, limited by tire grip
+- Front-wheel bicycle steering around the rear axle, with 50-degree steering lock
+  (about a 4 m low-speed rear-axle turning radius) and a 1.5 rad/s arcade turn-rate cap
+- Steering reaches 90% input in about 0.1 seconds, including quick centering/reversal
+- Camera follows the current physics frame and truck heading without added lag;
+  manual look-around remains smoothed and frame-rate independent
 - 5-speed automatic transmission
 - Gear-dependent acceleration, payload mass, rolling resistance, and air drag
 - Responsive truck controls: up to 12 mph/s acceleration and 40 mph/s braking unloaded
-- Speed-limited steering stays responsive while braking; cargo uses physical sliding/tumbling contacts
+- Steering stays responsive while braking; cargo uses physical sliding/tumbling contacts
 - Collision detection with buildings/walls and suspension weight transfer
 
 **Cargo System:**
