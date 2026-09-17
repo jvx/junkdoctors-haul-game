@@ -43,6 +43,7 @@ In another terminal, from repo root:
 ```bash
 node --test tests/house-streaming.mjs
 node tests/physics-browser.mjs
+node tests/cargo-contact-browser.mjs
 for f in scripts/*.js; do node --check "$f"; done
 git diff --check
 ```
@@ -53,6 +54,9 @@ pause/restart, physics off, delivery completion, and the actual loading/keyboard
 30/60/144 FPS simulation results and saves metrics/screenshots in `output/physics/`.
 Set `GAME_URL` for another local server and `PLAYWRIGHT_MODULE` when using an
 existing Playwright installation outside the repository.
+The contact suite checks open furniture gaps, tabletop versus foot contact,
+equal-mass sliding, airborne exclusion, and partial contact at the bed edge;
+it saves metrics and a support screenshot in `output/contact/`.
 The dependency-free house-streaming tests check idle budgets, busy-frame deferral,
 timeout/fallback progress, and disabled or stale work.
 
@@ -164,13 +168,18 @@ The player-controlled truck with:
 - By default, dynamic Havok bodies handle friction, stacking, sliding,
   tipping, and impacts without pose locks or per-frame velocity clamps
 - Contact-gated lateral grip reduces excessive sideways motion from arcade
-  steering, including supported stacks, without changing straight-line friction
-  or assisting airborne cargo
+  steering, including supported stacks, without assisting airborne cargo
 - Increased rotational inertia and angular damping give cargo a heavier feel:
   small knocks settle quickly, while hard impacts can still tip unsecured items.
   Payload weights, linear damping, and the truck controls are unchanged.
-- Simplified box collision shapes remain; the truck follows a road-plane
-  vehicle model rather than a full wheel/suspension rigid-body simulation
+- Chairs and tables use compound collision shapes around the model's individual
+  wooden parts, leaving space between legs and backrest rails open. Other items
+  use box shapes matching their visible fallback geometry.
+- As a gameplay rule, more floor-contact area means more friction. Grip uses
+  downward-facing part surfaces clipped to the bed, not the whole footprint;
+  feet and edges grip less than a broad flat face. Grip is capped, not a lock.
+- The truck follows a road-plane vehicle model rather than a full
+  wheel/suspension rigid-body simulation.
 
 **Key Constants:**
 ```javascript

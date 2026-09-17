@@ -1350,7 +1350,7 @@ class Truck {
         this._truckAngularVelocity = new BABYLON.Vector3(angularDelta.x, angularDelta.y, angularDelta.z).scale(2 / dt);
 
         this.applyTransform();
-        this.applyCargoTurnGrip(dt);
+        this.updateCargoGrip(dt);
         this.updateWheelSteering(keys);
         this.updateTailLights(autoBraking, keys);
         if (this.audioManager) {
@@ -1565,12 +1565,17 @@ class Truck {
         if (!body) return;
         this._cargoItemsByBody.set(body, item);
         body.setCollisionCallbackEnabled(true);
+        body.setCollisionEndedCallbackEnabled(true);
         body.getCollisionObservable().add(event => {
             if (!event.point || !event.normal || Math.abs(event.normal.y) < 0.5) return;
             const other = event.collider === body ? event.collidedAgainst : event.collider;
             if (event.point.y >= item.mesh.position.y || other.transformNode.position.y >= item.mesh.position.y) return;
             if (other.transformNode !== this.truckFloorMesh && !this._cargoItemsByBody.has(other)) return;
-            item._cargoSupport = { body: other, step: this._cargoPhysicsStep };
+            item._cargoSupport = { body: other };
+        });
+        body.getCollisionEndedObservable().add(event => {
+            const other = event.collider === body ? event.collidedAgainst : event.collider;
+            if (item._cargoSupport?.body === other) item._cargoSupport = null;
         });
     }
 
@@ -1578,7 +1583,9 @@ class Truck {
         // Follow actual contact support through a stack, bounded to avoid cycles.
         for (let depth = 0; depth < this.loadedItems.length; depth++) {
             const support = item._cargoSupport;
-            if (item.isFallen || !support || support.step < this._cargoPhysicsStep - 1) return false;
+            // Sleeping bodies stop emitting continued-contact events. Retain
+            // support until separation instead of making their grip disappear.
+            if (item.isFallen || !support || support.body.transformNode.isDisposed()) return false;
             if (support.body.transformNode === this.truckFloorMesh) return true;
             item = this._cargoItemsByBody.get(support.body);
             if (!item) return false;
@@ -1586,26 +1593,44 @@ class Truck {
         return false;
     }
 
-    applyCargoTurnGrip(dt) {
-        if (!this.enableItemPhysics || !this.cargoLateralGrip || Math.abs(this._truckRotationRate) < 0.01) return;
+    updateCargoGrip(dt) {
+        if (!this.enableItemPhysics) return;
         const right = new BABYLON.Vector3(Math.cos(this.rotation), 0, -Math.sin(this.rotation));
-        const response = 1 - Math.exp(-this.cargoLateralGrip * dt);
         for (const item of this.loadedItems) {
-            if (item.isParented || !this.isCargoSupported(item)) continue;
+            if (item.isParented || !item.mesh?.physicsAggregate) continue;
+            const supported = this.isCargoSupported(item);
+            const onFloor = supported && item._cargoSupport.body.transformNode === this.truckFloorMesh;
+            if (!onFloor) item.floorContactArea = 0;
+            else if (item.floorContactArea === undefined || this._cargoPhysicsStep % 4 === 0) {
+                item.floorContactArea = PhysicsSystem.floorContactArea(item, this);
+            }
+            const friction = PhysicsSystem.contactFriction(item.floorContactArea || 0);
+            if (Math.abs(friction - (item._contactFriction || 0)) > 0.01) {
+                const material = { friction, staticFriction: friction * 1.2, restitution: 0,
+                    frictionCombine: BABYLON.PhysicsMaterialCombineMode.MINIMUM };
+                for (const shape of item.mesh.collisionShapes) shape.material = material;
+                item._contactFriction = friction;
+            }
+            if (!supported || !this.cargoLateralGrip || Math.abs(this._truckRotationRate) < 0.01) continue;
             const body = item.mesh.physicsAggregate.body;
             const velocity = body.getLinearVelocity();
-            // Use the lowest corner: a reported manifold point can be lifting
-            // while another corner remains planted as the item tips.
-            item.mesh.computeWorldMatrix(true);
-            const point = item.mesh.getBoundingInfo().boundingBox.vectorsWorld.reduce((lowest, corner) => corner.y < lowest.y ? corner : lowest);
-            const contactVelocity = BABYLON.Vector3.Cross(body.getAngularVelocity(), point.subtract(item.mesh.position)).add(velocity);
+            const center = PhysicsSystem.centerOfMass(item.mesh);
+            const matrix = item.mesh.getWorldMatrix();
+            const corners = item.mesh.collisionParts.flatMap(part => PhysicsSystem.partCorners(part));
+            const point = corners.map(p => BABYLON.Vector3.TransformCoordinates(p, matrix))
+                .reduce((lowest, corner) => corner.y < lowest.y ? corner : lowest);
+            const contactVelocity = BABYLON.Vector3.Cross(body.getAngularVelocity(), point.subtract(center)).add(velocity);
             if (contactVelocity.y - this.getPointVelocity(point).y > 0.3) continue; // Separating contact, not tipping about it.
-            const relativeVelocity = this.getPointVelocity(item.mesh.position).subtract(velocity);
+            // Sample the moving contact at mid-step, not its previous pose,
+            // so the end-step bed target does not introduce sideways lag.
+            const relativeVelocity = this.getPointVelocity(center.add(velocity.scale(dt * 0.5))).subtract(velocity);
+            const areaGrip = onFloor ? 0.65 + 0.35 * Math.min(1, Math.sqrt(item.floorContactArea / 0.16)) : 0.75;
+            const response = 1 - Math.exp(-this.cargoLateralGrip * areaGrip * dt);
             // Extra lateral grip compensates for arcade yaw, not throttle/brake
             // motion. Apply a bounded impulse at the COM, never a pose/velocity lock.
             const deltaV = BABYLON.Vector3.Dot(relativeVelocity, right) * response;
             const impulse = Math.max(-80 * dt, Math.min(80 * dt, deltaV)) * body.getMassProperties().mass;
-            body.applyImpulse(right.scale(impulse), item.mesh.position);
+            body.applyImpulse(right.scale(impulse), center);
         }
     }
 
@@ -1665,7 +1690,10 @@ class Truck {
         this._truckRotationRate = 0;
         this._truckAngularVelocity = BABYLON.Vector3.Zero();
         this._cargoPhysicsStep = 0;
-        for (const item of this.loadedItems) item._cargoSupport = null;
+        for (const item of this.loadedItems) {
+            item._cargoSupport = null;
+            item.floorContactArea = undefined;
+        }
         this._collisionCache = null;
         this.resetDrivingKeys();
         this.applyTransform(true);
@@ -1939,7 +1967,7 @@ class Truck {
             // Create moving truck bodies. Contact friction now handles cargo
             // motion; cargo is not pinned or orientation-locked in physics mode.
             const physicsParts = [
-                { mesh: this.truckFloorMesh, friction: 1.6, restitution: 0.0 },
+                { mesh: this.truckFloorMesh, friction: 3.2, restitution: 0.0 },
                 { mesh: this.truckLeftWallMesh, friction: 0.02, restitution: 0.0 },
                 { mesh: this.truckRightWallMesh, friction: 0.02, restitution: 0.0 },
                 { mesh: this.truckFrontWallMesh, friction: 0.02, restitution: 0.0 },
@@ -1977,12 +2005,11 @@ class Truck {
                 );
 
                 if (mesh === this.truckFloorMesh) {
-                    // Grippy bed contacts suit the sharp arcade turns. Apply this
-                    // only at the floor; cargo remains free to rotate and fall.
+                    // Let each item's actual contact area determine bed grip.
                     aggregate.shape.material = {
                         ...aggregate.shape.material,
-                        staticFriction: 2.0,
-                        frictionCombine: BABYLON.PhysicsMaterialCombineMode.MAXIMUM
+                        staticFriction: 3.84,
+                        frictionCombine: BABYLON.PhysicsMaterialCombineMode.MINIMUM
                     };
                 }
             
