@@ -29,9 +29,9 @@ class Truck {
         this.brakeDeceleration = 40; // mph/s; responsive game controls, not a truck simulator
         this.rearAxleOffset = 1.8;
         this.wheelbase = 4.8;
-        this.maxSteerAngle = Math.PI / 5;
+        this.maxSteerAngle = 50 * Math.PI / 180;
         this.steeringResponse = 26; // 90% input within 0.1 seconds, including a physics tick
-        this.maxTurnRate = 1.1; // rad/s; responsive arcade handling at road speed
+        this.maxTurnRate = 1.5; // rad/s; responsive arcade handling at road speed
         this.turnInput = 0;
         this.currentSteerAngle = 0;
         this.currentAcceleration = 0; // For physics effects on items

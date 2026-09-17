@@ -24,7 +24,7 @@ URL params can be combined for faster playtesting:
 Examples:
 
 - Local level 2 physics-loading test: `http://localhost:8000/?lvl=2&physics=1&pickup=truck`
-- Live level 2 physics-loading test: https://jayremedy.github.io/junkdoctors-haul-game/?lvl=2&physics=1&pickup=truck
+- Live level 2 physics-loading test: https://jvx.github.io/junkdoctors-haul-game/?lvl=2&physics=1&pickup=truck
 - Start screen with physics pre-enabled: `http://localhost:8000/?physics=1`
 
 ### Physics Regression Checks
@@ -143,7 +143,8 @@ The player-controlled truck with:
 
 **Driving Physics:**
 - Fixed 120 Hz driving updates synchronized with Havok cargo contacts
-- Front-wheel bicycle steering around the rear axle, with a 1.1 rad/s arcade turn-rate cap
+- Front-wheel bicycle steering around the rear axle, with 50-degree steering lock
+  (about a 4 m low-speed rear-axle turning radius) and a 1.5 rad/s arcade turn-rate cap
 - Steering reaches 90% input in about 0.1 seconds, including quick centering/reversal
 - Camera follows the current physics frame and truck heading without added lag;
   manual look-around remains smoothed and frame-rate independent

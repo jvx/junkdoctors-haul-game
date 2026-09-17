@@ -176,6 +176,13 @@ try {
         advance(1, { s: true, a: true });
         result.reverse.yaw = truck.rotation;
         reset();
+        truck.speed = -10;
+        advance(1, { a: true });
+        result.tightTurn = {
+            radius: Math.abs(truck.speed * 0.44704 / truck.turnRate),
+            yaw: Math.abs(truck.rotation)
+        };
+        reset();
         truck.speed = -50;
         advance(1, { a: true });
         result.cornering = { yawRate: Math.abs(truck.turnRate), yaw: Math.abs(truck.rotation) };
@@ -314,8 +321,10 @@ try {
     assert.equal(metrics.steeringResponse.parkedYaw, 0);
     assert(metrics.reverse.speed > 0 && metrics.reverse.speed <= 12);
     assert(metrics.reverse.z > 0 && metrics.reverse.yaw > 0);
-    assert(metrics.cornering.yawRate > 1 && metrics.cornering.yawRate <= 1.1 + 1e-6);
-    assert(metrics.cornering.yaw > 1 && metrics.cornering.yaw < 1.1);
+    assert(metrics.tightTurn.radius > 3.9 && metrics.tightTurn.radius < 4.2);
+    assert(metrics.tightTurn.yaw > 1);
+    assert(metrics.cornering.yawRate > 1.4 && metrics.cornering.yawRate <= 1.5 + 1e-6);
+    assert(metrics.cornering.yaw > 1.4 && metrics.cornering.yaw < 1.5);
     for (const camera of metrics.cameraRates) {
         assert(camera.heldOffset > 1.5 && camera.releasedOffset < 0.15);
         assert(Math.abs(camera.heldOffset - metrics.cameraRates[0].heldOffset) < 0.04);
