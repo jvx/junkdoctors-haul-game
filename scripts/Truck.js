@@ -68,7 +68,7 @@ class Truck {
         
         // Items on truck
         this.loadedItems = [];
-        this.cargoLateralGrip = 180; // Per-second bed-relative grip during arcade turns
+        this.cargoLateralGrip = 540; // Per-second bed-relative grip during arcade turns
         this._cargoPhysicsStep = 0;
         this._cargoItemsByBody = new WeakMap();
         this.enablePerfStats = false;

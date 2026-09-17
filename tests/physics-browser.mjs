@@ -182,6 +182,35 @@ try {
             }
         }
         truck.cargoLateralGrip = lateralGrip;
+        result.heavyCargo = [];
+        const inertiaScale = manager.cargoInertiaScale;
+        const angularDamping = manager.cargoAngularDamping;
+        for (const legacy of [true, false]) {
+            reset();
+            manager.cargoInertiaScale = legacy ? 1 : inertiaScale;
+            manager.cargoAngularDamping = legacy ? 0.12 : angularDamping;
+            const item = place('chair');
+            advance(1);
+            const body = item.mesh.physicsAggregate.body;
+            body.applyImpulse(new BABYLON.Vector3(4, 0, 0), item.mesh.position.add(new BABYLON.Vector3(0, 0.45, 0)));
+            const angularSpeed = body.getAngularVelocity().length();
+            const samples = advance(0.5, {}, 60, item);
+            result.heavyCargo.push({ legacy, mass: body.getMassProperties().mass, angularSpeed,
+                maxTilt: Math.max(...samples.map(s => s.tilt)), fallen: item.isFallen });
+        }
+        manager.cargoInertiaScale = inertiaScale;
+        manager.cargoAngularDamping = angularDamping;
+        reset();
+        truck.speed = -35;
+        advance(0.1);
+        chair = place();
+        advance(1);
+        const uprightStart = sample(chair);
+        const uprightBrake = advance(2, { space: true }, 60, chair);
+        result.uprightBraking = {
+            travel: Math.max(...uprightBrake.map(s => Math.hypot(s.x - uprightStart.x, s.z - uprightStart.z))),
+            maxTilt: Math.max(...uprightBrake.map(s => s.tilt)), fallen: chair.isFallen
+        };
         result.cargoIsolation = {};
         for (const assisted of [false, true]) {
             reset();
@@ -432,9 +461,21 @@ try {
         assert(Math.abs(turn.after.speed - turn.before.speed) < 0.001);
         assert(Math.abs(turn.after.yaw - turn.before.yaw) < 0.001);
     }
-    assert.deepEqual(metrics.cargoIsolation.assisted, metrics.cargoIsolation.unassisted, 'Straight-line cargo friction must not change');
+    assert.equal(metrics.cargoIsolation.assisted.z, metrics.cargoIsolation.unassisted.z);
+    for (const phase of ['accelerated', 'braked']) {
+        const before = metrics.cargoIsolation.unassisted[phase];
+        const after = metrics.cargoIsolation.assisted[phase];
+        for (const field of ['x', 'y', 'z', 'tilt', 'vy']) {
+            assert(Math.abs(before[field] - after[field]) < 0.0001, 'Turn grip must not affect straight-line cargo motion');
+        }
+        assert.equal(after.fallen, before.fallen);
+    }
+    const [light, heavy] = metrics.heavyCargo;
+    assert.equal(heavy.mass, light.mass, 'Cargo feel must not change payload mass');
+    assert(heavy.angularSpeed < light.angularSpeed * 0.4, JSON.stringify(metrics.heavyCargo));
+    assert(heavy.maxTilt < light.maxTilt * 0.6 && !heavy.fallen, JSON.stringify(metrics.heavyCargo));
     for (const turn of metrics.sustainedTurns) {
-        assert(turn.after.travel < turn.before.travel * 0.65 && !turn.after.fallen, JSON.stringify(turn));
+        assert(turn.after.travel < turn.before.travel * 0.5 && !turn.after.fallen, JSON.stringify(turn));
     }
     for (const mph of [35, 65, 90]) {
         const [left, right] = metrics.sustainedTurns.filter(turn => turn.mph === mph);
@@ -468,7 +509,9 @@ try {
     assert(metrics.coasting.afterMph > metrics.coasting.beforeMph * 0.85);
     assert(metrics.braking.stopped);
     assert(metrics.braking.distance > 2 && metrics.braking.distance < 15);
-    assert(metrics.braking.cargoTravel > 0.2);
+    assert(metrics.braking.cargoTravel < 0.05, 'Flat heavy cargo should stay planted under braking');
+    assert(metrics.uprightBraking.travel > 0.05 && metrics.uprightBraking.maxTilt > 20 && !metrics.uprightBraking.fallen,
+        JSON.stringify(metrics.uprightBraking));
     assert(metrics.braking.maxUpwardSpeed < 3);
     assert(metrics.braking.maxTilt > 45);
     assert(!metrics.braking.fallen);

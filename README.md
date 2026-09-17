@@ -166,6 +166,9 @@ The player-controlled truck with:
 - Contact-gated lateral grip reduces excessive sideways motion from arcade
   steering, including supported stacks, without changing straight-line friction
   or assisting airborne cargo
+- Increased rotational inertia and angular damping give cargo a heavier feel:
+  small knocks settle quickly, while hard impacts can still tip unsecured items.
+  Payload weights, linear damping, and the truck controls are unchanged.
 - Simplified box collision shapes remain; the truck follows a road-plane
   vehicle model rather than a full wheel/suspension rigid-body simulation
 

@@ -36,6 +36,8 @@ class ItemManager {
         this.modelCache = {};
         this.modelSizes = {};
         this.modelVolumes = {};
+        this.cargoInertiaScale = 3;
+        this.cargoAngularDamping = 1.2;
     }
     
     applyCcdSettings(body, boxSize) {
@@ -85,10 +87,12 @@ class ItemManager {
 
     configurePlacedPhysicsBody(body, boxSize, worldPosition) {
         if (!body) return;
-        // Havok derives the box inertia from its dimensions and mass. World-space
-        // damping stays low so it cannot drag cargo backwards off a moving bed.
+        // Resist quick tipping without inflating payload mass or locking rotation.
+        const massProperties = body.getMassProperties();
+        body.setMassProperties({ ...massProperties, inertia: massProperties.inertia.scale(this.cargoInertiaScale) });
+        // Keep translation damping low so cargo is not dragged off a moving bed.
         body.setLinearDamping(0.03);
-        body.setAngularDamping(0.12);
+        body.setAngularDamping(this.cargoAngularDamping);
         body.setLinearVelocity(this.truck.getPointVelocity(worldPosition));
         body.setAngularVelocity(this.truck._truckAngularVelocity || BABYLON.Vector3.Zero());
         this.applyCcdSettings(body, boxSize);
