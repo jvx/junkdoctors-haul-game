@@ -48,7 +48,7 @@ git diff --check
 ```
 
 The suite checks parked and moving placement, acceleration/coasting/braking,
-payload effects, steering response through 65 mph, same-frame camera tracking, collisions, tipping, stacking,
+payload effects, steering response through 90 mph, same-frame camera tracking, collisions, tipping, stacking,
 pause/restart, physics off, delivery completion, and the actual loading/keyboard/mobile UI. It compares
 30/60/144 FPS simulation results and saves metrics/screenshots in `output/physics/`.
 Set `GAME_URL` for another local server and `PLAYWRIGHT_MODULE` when using an
@@ -155,19 +155,23 @@ The player-controlled truck with:
 - Gear-dependent acceleration, payload mass, rolling resistance, and air drag
 - Responsive truck controls: up to 12 mph/s acceleration and 40 mph/s braking unloaded
 - Steering stays responsive while braking; cargo uses physical sliding/tumbling contacts
-- Collision detection with buildings/walls and suspension weight transfer
+- Level-footprint building/wall collisions allow backing away after impact;
+  suspension lean remains active for the visuals and cargo
 
 **Cargo System:**
 - Cargo bed bounds tracking
 - Loaded items management
 - By default, dynamic Havok bodies handle friction, stacking, sliding,
   tipping, and impacts without pose locks or per-frame velocity clamps
+- Contact-gated lateral grip reduces excessive sideways motion from arcade
+  steering, including supported stacks, without changing straight-line friction
+  or assisting airborne cargo
 - Simplified box collision shapes remain; the truck follows a road-plane
   vehicle model rather than a full wheel/suspension rigid-body simulation
 
 **Key Constants:**
 ```javascript
-maxSpeed: 65          // Governed road speed in MPH
+maxSpeed: 90          // Governed road speed in MPH
 maxReverseSpeed: 12   // Reverse limit in MPH
 truckBaseMass: 3500   // Unladen mass in kg
 wheelbase: 4.8        // Meters between axles

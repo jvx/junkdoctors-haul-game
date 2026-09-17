@@ -24,7 +24,7 @@ class Truck {
         this.rotation = 0; // Y-axis rotation (heading)
         this.speed = 0;
         this.prevSpeed = 0;
-        this.maxSpeed = 65; // Governed road speed in mph
+        this.maxSpeed = 90; // Governed road speed in mph
         this.maxReverseSpeed = 12;
         this.brakeDeceleration = 40; // mph/s; responsive game controls, not a truck simulator
         this.rearAxleOffset = 1.8;
@@ -68,6 +68,9 @@ class Truck {
         
         // Items on truck
         this.loadedItems = [];
+        this.cargoLateralGrip = 180; // Per-second bed-relative grip during arcade turns
+        this._cargoPhysicsStep = 0;
+        this._cargoItemsByBody = new WeakMap();
         this.enablePerfStats = false;
         this.enableItemPhysics = true;
     }
@@ -1001,9 +1004,13 @@ class Truck {
         const oldX = this.root.position.x;
         const oldZ = this.root.position.z;
         const oldRotY = this.root.rotation.y;
+        const oldPitch = this.root.rotation.x;
+        const oldRoll = this.root.rotation.z;
         this.root.position.x = posX;
         this.root.position.z = posZ;
-        this.root.rotation.y = rotY;
+        // Building collisions use a level footprint. Suspension settling must
+        // not expand a stopped truck into a wall and block its reverse motion.
+        this.root.rotation.set(0, rotY, 0);
         // Single matrix update for the truck hierarchy
         this.root.computeWorldMatrix(true);
         
@@ -1047,7 +1054,7 @@ class Truck {
                         const maxDist = truckRadius + houseRadius;
                         if (dx * dx + dz * dz > maxDist * maxDist) continue;
                         
-                        // Houses are STATIC - no need to recompute their world matrix
+                        house.computeWorldMatrix(true);
                         for (let t = 0; t < truckMeshes.length; t++) {
                             if (truckMeshes[t].intersectsMesh(house, true)) {
                                 collision = true;
@@ -1068,6 +1075,7 @@ class Truck {
                 const houseRadius = house.collisionRadiusXZ || 10;
                 const maxDist = truckRadius + houseRadius;
                 if (dx * dx + dz * dz <= maxDist * maxDist) {
+                    house.computeWorldMatrix(true);
                     for (let t = 0; t < truckMeshes.length; t++) {
                         if (truckMeshes[t].intersectsMesh(house, true)) {
                             collision = true;
@@ -1084,6 +1092,7 @@ class Truck {
             for (let w = 0; w < walls.length; w++) {
                 const wall = walls[w];
                 if (!wall || wall.isDisposed?.()) continue;
+                wall.computeWorldMatrix(true);
                 for (let t = 0; t < truckMeshes.length; t++) {
                     if (truckMeshes[t].intersectsMesh(wall, true)) {
                         collision = true;
@@ -1097,8 +1106,9 @@ class Truck {
         // Restore truck position
         this.root.position.x = oldX;
         this.root.position.z = oldZ;
-        this.root.rotation.y = oldRotY;
+        this.root.rotation.set(oldPitch, oldRotY, oldRoll);
         this.root.computeWorldMatrix(true);
+        for (const mesh of truckMeshes) mesh.computeWorldMatrix(true);
         
         this._collisionCache = { frameId, posX, posZ, rotY, result: collision };
         return collision;
@@ -1261,6 +1271,7 @@ class Truck {
     updateDriving(deltaTime, options = {}) {
         const dt = Math.min(deltaTime, 1 / 30);
         if (!(dt > 0)) return;
+        this._cargoPhysicsStep++;
         const keys = options.inputEnabled === false
             ? { w: false, a: false, s: false, d: false, space: false }
             : this.keys;
@@ -1339,6 +1350,7 @@ class Truck {
         this._truckAngularVelocity = new BABYLON.Vector3(angularDelta.x, angularDelta.y, angularDelta.z).scale(2 / dt);
 
         this.applyTransform();
+        this.applyCargoTurnGrip(dt);
         this.updateWheelSteering(keys);
         this.updateTailLights(autoBraking, keys);
         if (this.audioManager) {
@@ -1512,9 +1524,6 @@ class Truck {
     }
     
     addLoadedItem(item) {
-        // Items are now PARENTED to truck.root in ItemManager.placeItem()
-        // They move automatically with the truck - no physics or manual updates needed!
-
         // If item is parented, local coords are already set by ItemManager
         if (item.isParented) {
             console.log(`📦 TRUCK: Added parented item ${item.id} at local (${item.localX?.toFixed(2)}, ${item.localZ?.toFixed(2)})`);
@@ -1522,7 +1531,7 @@ class Truck {
             return;
         }
 
-        // Legacy path for non-parented items (shouldn't happen anymore)
+        // Dynamic cargo keeps bed-local coordinates for placement and bounds.
         this.root.position.x = this.position.x;
         this.root.position.z = this.position.z;
         this.syncRootRotation();
@@ -1548,6 +1557,56 @@ class Truck {
         item.localQuat = truckQuatInv.multiply(meshQuat);
 
         this.loadedItems.push(item);
+        this.trackCargoSupport(item);
+    }
+
+    trackCargoSupport(item) {
+        const body = item.mesh.physicsAggregate?.body;
+        if (!body) return;
+        this._cargoItemsByBody.set(body, item);
+        body.setCollisionCallbackEnabled(true);
+        body.getCollisionObservable().add(event => {
+            if (!event.point || !event.normal || Math.abs(event.normal.y) < 0.5) return;
+            const other = event.collider === body ? event.collidedAgainst : event.collider;
+            if (event.point.y >= item.mesh.position.y || other.transformNode.position.y >= item.mesh.position.y) return;
+            if (other.transformNode !== this.truckFloorMesh && !this._cargoItemsByBody.has(other)) return;
+            item._cargoSupport = { body: other, step: this._cargoPhysicsStep };
+        });
+    }
+
+    isCargoSupported(item) {
+        // Follow actual contact support through a stack, bounded to avoid cycles.
+        for (let depth = 0; depth < this.loadedItems.length; depth++) {
+            const support = item._cargoSupport;
+            if (item.isFallen || !support || support.step < this._cargoPhysicsStep - 1) return false;
+            if (support.body.transformNode === this.truckFloorMesh) return true;
+            item = this._cargoItemsByBody.get(support.body);
+            if (!item) return false;
+        }
+        return false;
+    }
+
+    applyCargoTurnGrip(dt) {
+        if (!this.enableItemPhysics || !this.cargoLateralGrip || Math.abs(this._truckRotationRate) < 0.01) return;
+        const right = new BABYLON.Vector3(Math.cos(this.rotation), 0, -Math.sin(this.rotation));
+        const response = 1 - Math.exp(-this.cargoLateralGrip * dt);
+        for (const item of this.loadedItems) {
+            if (item.isParented || !this.isCargoSupported(item)) continue;
+            const body = item.mesh.physicsAggregate.body;
+            const velocity = body.getLinearVelocity();
+            // Use the lowest corner: a reported manifold point can be lifting
+            // while another corner remains planted as the item tips.
+            item.mesh.computeWorldMatrix(true);
+            const point = item.mesh.getBoundingInfo().boundingBox.vectorsWorld.reduce((lowest, corner) => corner.y < lowest.y ? corner : lowest);
+            const contactVelocity = BABYLON.Vector3.Cross(body.getAngularVelocity(), point.subtract(item.mesh.position)).add(velocity);
+            if (contactVelocity.y - this.getPointVelocity(point).y > 0.3) continue; // Separating contact, not tipping about it.
+            const relativeVelocity = this.getPointVelocity(item.mesh.position).subtract(velocity);
+            // Extra lateral grip compensates for arcade yaw, not throttle/brake
+            // motion. Apply a bounded impulse at the COM, never a pose/velocity lock.
+            const deltaV = BABYLON.Vector3.Dot(relativeVelocity, right) * response;
+            const impulse = Math.max(-80 * dt, Math.min(80 * dt, deltaV)) * body.getMassProperties().mass;
+            body.applyImpulse(right.scale(impulse), item.mesh.position);
+        }
     }
 
     getPointVelocity(worldPosition) {
@@ -1605,6 +1664,8 @@ class Truck {
         this._truckWorldVelZ = 0;
         this._truckRotationRate = 0;
         this._truckAngularVelocity = BABYLON.Vector3.Zero();
+        this._cargoPhysicsStep = 0;
+        for (const item of this.loadedItems) item._cargoSupport = null;
         this._collisionCache = null;
         this.resetDrivingKeys();
         this.applyTransform(true);
