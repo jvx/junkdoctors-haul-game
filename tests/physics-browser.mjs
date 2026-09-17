@@ -135,6 +135,36 @@ try {
             advance(1, { w: true, a: true }, fps);
             result.frameRates.push({ fps, speed: truck.speed, x: truck.position.x, z: truck.position.z, cargo: sample(chair) });
         }
+        const floorShape = truck.truckPhysicsAggregates[0].aggregate.shape;
+        const bedMaterial = { ...floorShape.material };
+        result.turnGrip = [];
+        for (const type of ['box', 'chair', 'table']) {
+            for (const key of ['a', 'd']) {
+                const turns = {};
+                for (const legacy of [true, false]) {
+                    reset();
+                    floorShape.material = legacy ? {
+                        friction: 0.85, staticFriction: 0.85, restitution: 0,
+                        frictionCombine: BABYLON.PhysicsMaterialCombineMode.MINIMUM
+                    } : bedMaterial;
+                    const item = place(type);
+                    advance(1);
+                    advance(2, { w: true });
+                    const start = sample(item);
+                    const samples = advance(0.4, { [key]: true }, 60, item);
+                    turns[legacy ? 'before' : 'after'] = {
+                        travel: Math.hypot(item.localX - start.x, item.localZ - start.z),
+                        maxTilt: Math.max(...samples.map(s => s.tilt)),
+                        fallen: item.isFallen,
+                        dynamic: item.mesh.physicsAggregate.body.getMotionType() === BABYLON.PhysicsMotionType.DYNAMIC,
+                        speed: truck.speed,
+                        yaw: truck.rotation
+                    };
+                }
+                result.turnGrip.push({ type, key, ...turns });
+            }
+        }
+        floorShape.material = bedMaterial;
         result.steering = [];
         for (const reverse of [false, true]) {
             for (const key of ['a', 'd']) {
@@ -288,6 +318,13 @@ try {
         const sign = turn.key === 'a' ? -1 : 1;
         assert(Math.abs(turn.yawRate * sign - 1.5) < 0.01, JSON.stringify(turn));
         assert(turn.yaw * sign > 1.35 && turn.yaw * sign < 1.5, JSON.stringify(turn));
+    }
+    for (const turn of metrics.turnGrip) {
+        assert(turn.after.travel < turn.before.travel * 0.9, JSON.stringify(turn));
+        assert(turn.after.travel > 0.1, 'Hard turns must still move unsecured cargo');
+        assert(turn.after.dynamic && !turn.after.fallen, JSON.stringify(turn));
+        assert(Math.abs(turn.after.speed - turn.before.speed) < 0.001);
+        assert(Math.abs(turn.after.yaw - turn.before.yaw) < 0.001);
     }
     assert(metrics.idle.dynamic);
     assert(metrics.idle.travel < 0.05);

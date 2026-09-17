@@ -1878,7 +1878,7 @@ class Truck {
             // Create moving truck bodies. Contact friction now handles cargo
             // motion; cargo is not pinned or orientation-locked in physics mode.
             const physicsParts = [
-                { mesh: this.truckFloorMesh, friction: 0.85, restitution: 0.0 },
+                { mesh: this.truckFloorMesh, friction: 1.6, restitution: 0.0 },
                 { mesh: this.truckLeftWallMesh, friction: 0.02, restitution: 0.0 },
                 { mesh: this.truckRightWallMesh, friction: 0.02, restitution: 0.0 },
                 { mesh: this.truckFrontWallMesh, friction: 0.02, restitution: 0.0 },
@@ -1914,6 +1914,16 @@ class Truck {
                     { mass: 0, friction, restitution },
                     this.scene
                 );
+
+                if (mesh === this.truckFloorMesh) {
+                    // Grippy bed contacts suit the sharp arcade turns. Apply this
+                    // only at the floor; cargo remains free to rotate and fall.
+                    aggregate.shape.material = {
+                        ...aggregate.shape.material,
+                        staticFriction: 2.0,
+                        frictionCombine: BABYLON.PhysicsMaterialCombineMode.MAXIMUM
+                    };
+                }
             
                 // Use ANIMATED bodies so moving truck parts have proper Havok
                 // velocity during contact with dynamic cargo.
