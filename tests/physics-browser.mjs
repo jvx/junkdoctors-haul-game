@@ -186,6 +186,15 @@ try {
         truck.speed = -50;
         advance(1, { a: true });
         result.cornering = { yawRate: Math.abs(truck.turnRate), yaw: Math.abs(truck.rotation) };
+        result.roadSpeedTurning = [];
+        for (const mph of [25, 45, 65]) {
+            for (const key of ['a', 'd']) {
+                reset();
+                truck.speed = -mph;
+                advance(1, { [key]: true });
+                result.roadSpeedTurning.push({ mph, key, yawRate: truck.turnRate, yaw: truck.rotation });
+            }
+        }
         reset();
         advance(100, { w: true }, 30);
         result.highway = { speed: -truck.speed, gear: truck.currentGear };
@@ -275,6 +284,11 @@ try {
     await page.screenshot({ path: path.join(output, 'desktop.png') });
     console.log(JSON.stringify(metrics, null, 2));
     assert.equal(errors.length, 0, errors.join('\n'));
+    for (const turn of metrics.roadSpeedTurning) {
+        const sign = turn.key === 'a' ? -1 : 1;
+        assert(Math.abs(turn.yawRate * sign - 1.5) < 0.01, JSON.stringify(turn));
+        assert(turn.yaw * sign > 1.35 && turn.yaw * sign < 1.5, JSON.stringify(turn));
+    }
     assert(metrics.idle.dynamic);
     assert(metrics.idle.travel < 0.05);
     assert(metrics.idle.maxTilt < 3);

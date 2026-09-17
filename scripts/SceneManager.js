@@ -2467,6 +2467,13 @@ class SceneManager {
             }
         });
 
+        // Populate nearby tiles first when idle time is scarce.
+        const tileDistance = (key) => {
+            const [x, z] = key.split('_').map(Number);
+            return (x - currentTileX) ** 2 + (z - currentTileZ) ** 2;
+        };
+        this.pendingHouseTiles.sort((a, b) => tileDistance(a) - tileDistance(b));
+
         // Process house creation off the render loop to avoid frame stutter
         this.scheduleHouseWork(houseNeededTiles, currentTileX, currentTileZ);
 
@@ -2511,28 +2518,26 @@ class SceneManager {
     }
 
     scheduleHouseWork(houseNeededTiles, currentTileX, currentTileZ) {
-        if (this._houseWorkScheduled) return;
+        if (this._houseWorkScheduled || !this.houseStreamingEnabled || !this.pendingHouseTiles.length) return;
         this._houseWorkScheduled = true;
 
         const runner = (deadline) => {
             this._houseWorkScheduled = false;
+            if (!this.houseStreamingEnabled) return;
             const maxMillis = 3; // Budget per idle callback
             const start = performance.now();
-            let created = 0;
             while (this.pendingHouseTiles.length > 0) {
+                // A tile cannot be interrupted: reserve time before starting it.
+                if (performance.now() - start >= maxMillis) break;
+                if (!deadline.didTimeout && deadline.timeRemaining() < maxMillis) break;
                 const tileKey = this.pendingHouseTiles.shift();
                 this.pendingHouseTileSet.delete(tileKey);
                 if (!houseNeededTiles.has(tileKey)) continue;
                 if (this.hasLiveHouses(tileKey)) continue;
                 const [gridX, gridZ] = tileKey.split('_').map(Number);
                 this.createHousesForTile(gridX, gridZ);
-                created++;
-
-                const elapsed = performance.now() - start;
-                const timeLeft = deadline && typeof deadline.timeRemaining === 'function'
-                    ? deadline.timeRemaining()
-                    : maxMillis - elapsed;
-                if (elapsed > maxMillis || timeLeft < 1) break;
+                // Busy browsers still make progress, but never force a batch.
+                if (deadline.didTimeout) break;
             }
 
             if (this.pendingHouseTiles.length > 0) {
@@ -2541,9 +2546,9 @@ class SceneManager {
         };
 
         if (typeof requestIdleCallback === 'function') {
-            requestIdleCallback(runner, { timeout: 16 });
+            requestIdleCallback(runner, { timeout: 100 });
         } else {
-            setTimeout(() => runner({ timeRemaining: () => 0 }), 0);
+            setTimeout(() => runner({ didTimeout: true, timeRemaining: () => 0 }), 16);
         }
     }
     

@@ -41,17 +41,20 @@ python3 -m http.server 8000
 In another terminal, from repo root:
 
 ```bash
+node --test tests/house-streaming.mjs
 node tests/physics-browser.mjs
 for f in scripts/*.js; do node --check "$f"; done
 git diff --check
 ```
 
 The suite checks parked and moving placement, acceleration/coasting/braking,
-payload effects, steering response, same-frame camera tracking, collisions, tipping, stacking,
+payload effects, steering response through 65 mph, same-frame camera tracking, collisions, tipping, stacking,
 pause/restart, physics off, delivery completion, and the actual loading/keyboard/mobile UI. It compares
 30/60/144 FPS simulation results and saves metrics/screenshots in `output/physics/`.
 Set `GAME_URL` for another local server and `PLAYWRIGHT_MODULE` when using an
 existing Playwright installation outside the repository.
+The dependency-free house-streaming tests check idle budgets, busy-frame deferral,
+timeout/fallback progress, and disabled or stale work.
 
 `?test=1` enables manual `window.advanceTime(ms)` stepping for browser tests;
 `window.render_game_to_text()` reports the current state. Test URLs should also
