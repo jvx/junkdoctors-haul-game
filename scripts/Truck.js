@@ -1621,10 +1621,13 @@ class Truck {
                 .reduce((lowest, corner) => corner.y < lowest.y ? corner : lowest);
             const contactVelocity = BABYLON.Vector3.Cross(body.getAngularVelocity(), point.subtract(center)).add(velocity);
             if (contactVelocity.y - this.getPointVelocity(point).y > 0.3) continue; // Separating contact, not tipping about it.
-            // Sample the moving contact at mid-step, not its previous pose,
-            // so the end-step bed target does not introduce sideways lag.
-            const relativeVelocity = this.getPointVelocity(center.add(velocity.scale(dt * 0.5))).subtract(velocity);
-            const areaGrip = onFloor ? 0.65 + 0.35 * Math.min(1, Math.sqrt(item.floorContactArea / 0.16)) : 0.75;
+            const contactCoverage = onFloor ? Math.min(1, Math.sqrt(item.floorContactArea / 0.32)) : 0;
+            // Broad floor contact tracks the end-step bed velocity, avoiding
+            // accumulated turn drift. Feet/edges retain more slip; stacks keep
+            // their existing response. This predicts velocity, not position.
+            const contactLead = onFloor ? 0.7 + 0.3 * contactCoverage : 0.5;
+            const relativeVelocity = this.getPointVelocity(center.add(velocity.scale(dt * contactLead))).subtract(velocity);
+            const areaGrip = onFloor ? 0.65 + 0.35 * contactCoverage : 0.75;
             const response = 1 - Math.exp(-this.cargoLateralGrip * areaGrip * dt);
             // Extra lateral grip compensates for arcade yaw, not throttle/brake
             // motion. Apply a bounded impulse at the COM, never a pose/velocity lock.

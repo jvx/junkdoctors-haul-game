@@ -475,7 +475,7 @@ try {
     assert(heavy.angularSpeed < light.angularSpeed * 0.4, JSON.stringify(metrics.heavyCargo));
     assert(heavy.maxTilt < light.maxTilt * 0.6 && !heavy.fallen, JSON.stringify(metrics.heavyCargo));
     for (const turn of metrics.sustainedTurns) {
-        assert(turn.after.travel < turn.before.travel * 0.5 && !turn.after.fallen, JSON.stringify(turn));
+        assert(turn.after.travel < turn.before.travel * 0.2 && !turn.after.fallen, JSON.stringify(turn));
     }
     for (const mph of [35, 65, 90]) {
         const [left, right] = metrics.sustainedTurns.filter(turn => turn.mph === mph);

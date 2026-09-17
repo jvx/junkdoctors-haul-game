@@ -60,7 +60,7 @@ try {
             body.setPrestepType(BABYLON.PhysicsPrestepType.DISABLED);
             advance(2);
         };
-        const result = { table: [], sliding: [] };
+        const result = { table: [], sliding: [], turns: [] };
         for (const upsideDown of [false, true]) {
             reset();
             const item = place('table');
@@ -80,6 +80,36 @@ try {
             advance(0.5);
             result.sliding.push({ wide, area, friction, distance: BABYLON.Vector3.Distance(start, item.mesh.position), fallen: item.isFallen });
         }
+        for (const mph of [35, 65, 90]) for (const key of ['a', 'd']) for (const wide of [false, true]) {
+            reset();
+            t.speed = -mph;
+            advance(0.1);
+            const item = place('box', { x: wide ? 0.8 : 0.2, y: 0.1, z: 0.4 });
+            advance(1);
+            const start = { x: item.localX, z: item.localZ };
+            const area = item.floorContactArea;
+            t.keys[key] = true;
+            let maxTravel = 0;
+            for (let i = 0; i < 120; i++) {
+                advance(1 / 120);
+                maxTravel = Math.max(maxTravel, Math.hypot(item.localX - start.x, item.localZ - start.z));
+            }
+            result.turns.push({ mph, key, wide, area, maxTravel, fallen: item.isFallen });
+        }
+        reset();
+        t.speed = -35;
+        advance(0.1);
+        const struck = place('box', { x: 0.8, y: 0.1, z: 0.4 });
+        advance(1);
+        t.keys.a = true;
+        advance(0.2);
+        const struckStart = { x: struck.localX, z: struck.localZ };
+        const struckBody = struck.mesh.physicsAggregate.body;
+        const right = new BABYLON.Vector3(Math.cos(t.rotation), 0, -Math.sin(t.rotation));
+        struckBody.applyImpulse(right.scale(struckBody.getMassProperties().mass * 8), PhysicsSystem.centerOfMass(struck.mesh));
+        advance(0.15);
+        result.turnImpact = { travel: Math.hypot(struck.localX - struckStart.x, struck.localZ - struckStart.z),
+            dynamic: struckBody.getMotionType() === BABYLON.PhysicsMotionType.DYNAMIC };
         reset();
         const chair = place('chair');
         advance(1);
@@ -155,6 +185,14 @@ try {
     assert(metrics.sliding[1].friction > metrics.sliding[0].friction);
     assert(metrics.sliding[1].distance < metrics.sliding[0].distance * 0.85);
     assert(metrics.sliding.every(item => !item.fallen && item.distance > 0.01));
+    for (const turn of metrics.turns.filter(item => item.wide)) {
+        const narrow = metrics.turns.find(item => !item.wide && item.mph === turn.mph && item.key === turn.key);
+        assert(turn.area > narrow.area * 3);
+        assert(turn.maxTravel < 0.005, 'Broad floor contact should stay planted through a sustained turn');
+        assert(turn.maxTravel <= narrow.maxTravel + 0.0002, 'Broader contact should not increase turn sliding');
+        assert(narrow.maxTravel < 0.02 && !narrow.fallen && !turn.fallen);
+    }
+    assert(metrics.turnImpact.dynamic && metrics.turnImpact.travel > 0.05, 'Turn grip must not lock cargo against a hard impact');
     assert.equal(metrics.airArea, 0);
     assert(metrics.bedEdge.edgeArea > 0 && metrics.bedEdge.edgeArea < metrics.bedEdge.fullArea * 0.6);
     console.log('Furniture support and contact-area friction checks passed.');

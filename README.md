@@ -57,6 +57,8 @@ existing Playwright installation outside the repository.
 The contact suite checks open furniture gaps, tabletop versus foot contact,
 equal-mass sliding, airborne exclusion, and partial contact at the bed edge;
 it saves metrics and a support screenshot in `output/contact/`.
+It also checks broad-contact cargo through left/right turns at 35/65/90 mph
+and verifies that a sideways impact can still move it during a turn.
 The dependency-free house-streaming tests check idle budgets, busy-frame deferral,
 timeout/fallback progress, and disabled or stale work.
 
@@ -178,6 +180,8 @@ The player-controlled truck with:
 - As a gameplay rule, more floor-contact area means more friction. Grip uses
   downward-facing part surfaces clipped to the bed, not the whole footprint;
   feet and edges grip less than a broad flat face. Grip is capped, not a lock.
+- Turn grip compensates for the moving bed's next-step velocity most strongly
+  on broad contact surfaces, reducing sideways drift without changing braking.
 - The truck follows a road-plane vehicle model rather than a full
   wheel/suspension rigid-body simulation.
 
