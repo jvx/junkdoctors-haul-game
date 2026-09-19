@@ -385,6 +385,52 @@ try {
             game.sceneManager.housesByTile = {};
             game.sceneManager.pickupHouse = null;
         }
+        result.overlapRecovery = [];
+        const blocksMovement = truck.blocksTruckMovement;
+        for (const kind of ['house', 'pickup', 'wall']) for (const reverse of [false, true])
+            for (const yaw of [0, 0.7]) for (const legacy of [true, false]) {
+            reset();
+            truck.checkMeshCollision = originalCheck;
+            truck.blocksTruckMovement = legacy ? (mesh, obstacle) => mesh.intersectsMesh(obstacle, true) : blocksMovement;
+            truck.rotation = yaw;
+            truck.applyTransform(true);
+            const direction = new BABYLON.Vector3(Math.sin(yaw), 0, Math.cos(yaw)).scale(reverse ? 1 : -1);
+            const wall = BABYLON.MeshBuilder.CreateBox('overlapObstacle', { width: 12, height: 5, depth: 2 }, game.scene);
+            wall.position.copyFrom(direction.scale(10));
+            wall.position.y = 2.5;
+            wall.rotation.y = yaw;
+            if (kind === 'house') game.sceneManager.housesByTile = { '0_0': [wall] };
+            else if (kind === 'pickup') game.sceneManager.pickupHouse = wall;
+            else game.sceneManager.destinationWalls = [wall];
+            advance(4, { [reverse ? 's' : 'w']: true });
+            // Reproduce a streamed/moved obstacle penetrating an already stopped truck.
+            wall.position.subtractInPlace(direction.scale(0.08));
+            wall.computeWorldMatrix(true);
+            truck._collisionCache = null;
+            const start = truck.position.clone();
+            const blockedAtRest = originalCheck(start.x, start.z, truck.rotation);
+            advance(0.5, { [reverse ? 's' : 'w']: true });
+            const pushing = BABYLON.Vector3.Distance(start, truck.position);
+            if (!legacy && kind === 'house' && !reverse && yaw === 0) {
+                const rear = Math.max(...truck.collisionMeshes.map(mesh => mesh.getBoundingInfo().boundingBox.maximumWorld.z));
+                const other = BABYLON.MeshBuilder.CreateBox('escapeBlocker', { width: 12, height: 5, depth: 0.1 }, game.scene);
+                other.position.set(0, 2.5, rear + 0.055);
+                game.sceneManager.destinationWalls = [other];
+                truck._collisionCache = null;
+                result.escapeIntoOtherBlocked = originalCheck(start.x, start.z + 0.02, yaw);
+                other.dispose();
+                game.sceneManager.destinationWalls = [];
+                truck._collisionCache = null;
+            }
+            advance(1, { [reverse ? 'w' : 's']: true });
+            result.overlapRecovery.push({ kind, reverse, yaw, legacy, blockedAtRest, pushing,
+                escape: -BABYLON.Vector3.Dot(truck.position.subtract(start), direction) });
+            wall.dispose();
+            game.sceneManager.housesByTile = {};
+            game.sceneManager.pickupHouse = null;
+            game.sceneManager.destinationWalls = [];
+        }
+        truck.blocksTruckMovement = blocksMovement;
         reset();
         chair = place();
         advance(1);
@@ -496,6 +542,11 @@ try {
         }
         assert(recovery.escape > 1 && Math.abs(recovery.speed) > 5, JSON.stringify(recovery));
     }
+    for (const recovery of metrics.overlapRecovery) {
+        assert(recovery.blockedAtRest && recovery.pushing < 0.001, JSON.stringify(recovery));
+        assert(recovery.legacy ? Math.abs(recovery.escape) < 0.001 : recovery.escape > 1, JSON.stringify(recovery));
+    }
+    assert(metrics.escapeIntoOtherBlocked, 'Escaping one obstacle must not enter another');
     assert(metrics.idle.dynamic);
     assert(metrics.idle.travel < 0.05);
     assert(metrics.idle.maxTilt < 3);

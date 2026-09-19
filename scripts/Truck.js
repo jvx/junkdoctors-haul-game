@@ -988,6 +988,43 @@ class Truck {
         return result.newCollisions > 0;
     }
     
+    collisionPenetration(mesh, obstacle) {
+        const a = mesh.getBoundingInfo().boundingBox;
+        const b = obstacle.getBoundingInfo().boundingBox;
+        let depth = Infinity;
+        for (const direction of [a.directions[0], a.directions[2], b.directions[0], b.directions[2]]) {
+            const axis = new BABYLON.Vector3(direction.x, 0, direction.z).normalize();
+            const pa = a.vectorsWorld.map(p => BABYLON.Vector3.Dot(p, axis));
+            const pb = b.vectorsWorld.map(p => BABYLON.Vector3.Dot(p, axis));
+            depth = Math.min(depth, Math.max(...pa) - Math.min(...pb), Math.max(...pb) - Math.min(...pa));
+        }
+        return Math.max(0, depth);
+    }
+
+    blocksTruckMovement(mesh, obstacle) {
+        if (!mesh.intersectsMesh(obstacle, true)) return false;
+        const nextDepth = this.collisionPenetration(mesh, obstacle);
+        const targetPosition = this.root.position.clone();
+        const targetRotation = this.root.rotation.clone();
+        let currentDepth = 0;
+        try {
+            // Only an existing overlap may be escaped. Check each obstacle and
+            // truck part independently so recovery cannot enter another wall.
+            this.root.position.x = this.position.x;
+            this.root.position.z = this.position.z;
+            this.root.rotation.set(0, this.rotation, 0);
+            this.root.computeWorldMatrix(true);
+            mesh.computeWorldMatrix(true);
+            if (mesh.intersectsMesh(obstacle, true)) currentDepth = this.collisionPenetration(mesh, obstacle);
+        } finally {
+            this.root.position.copyFrom(targetPosition);
+            this.root.rotation.copyFrom(targetRotation);
+            this.root.computeWorldMatrix(true);
+            for (const part of this.collisionMeshes) part.computeWorldMatrix(true);
+        }
+        return currentDepth <= 0 || nextDepth >= currentDepth - 0.000001;
+    }
+
     // Check if position/rotation would cause mesh collision (accurate OBB check)
     checkMeshCollision(posX, posZ, rotY = this.rotation) {
         if (!this.sceneManager) return false;
@@ -997,7 +1034,9 @@ class Truck {
             && this._collisionCache.posX === posX
             && this._collisionCache.posZ === posZ
             && this._collisionCache.rotY === rotY) {
-            return this._collisionCache.result;
+            if (this._collisionCache.startX === this.position.x
+                && this._collisionCache.startZ === this.position.z
+                && this._collisionCache.startYaw === this.rotation) return this._collisionCache.result;
         }
         
         // Temporarily move the truck root to test position
@@ -1056,7 +1095,7 @@ class Truck {
                         
                         house.computeWorldMatrix(true);
                         for (let t = 0; t < truckMeshes.length; t++) {
-                            if (truckMeshes[t].intersectsMesh(house, true)) {
+                            if (this.blocksTruckMovement(truckMeshes[t], house)) {
                                 collision = true;
                                 break outer;
                             }
@@ -1077,7 +1116,7 @@ class Truck {
                 if (dx * dx + dz * dz <= maxDist * maxDist) {
                     house.computeWorldMatrix(true);
                     for (let t = 0; t < truckMeshes.length; t++) {
-                        if (truckMeshes[t].intersectsMesh(house, true)) {
+                        if (this.blocksTruckMovement(truckMeshes[t], house)) {
                             collision = true;
                             break;
                         }
@@ -1094,7 +1133,7 @@ class Truck {
                 if (!wall || wall.isDisposed?.()) continue;
                 wall.computeWorldMatrix(true);
                 for (let t = 0; t < truckMeshes.length; t++) {
-                    if (truckMeshes[t].intersectsMesh(wall, true)) {
+                    if (this.blocksTruckMovement(truckMeshes[t], wall)) {
                         collision = true;
                         break;
                     }
@@ -1110,7 +1149,8 @@ class Truck {
         this.root.computeWorldMatrix(true);
         for (const mesh of truckMeshes) mesh.computeWorldMatrix(true);
         
-        this._collisionCache = { frameId, posX, posZ, rotY, result: collision };
+        this._collisionCache = { frameId, posX, posZ, rotY, startX: this.position.x,
+            startZ: this.position.z, startYaw: this.rotation, result: collision };
         return collision;
     }
     
