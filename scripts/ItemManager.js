@@ -36,6 +36,9 @@ class ItemManager {
         this.modelCache = {};
         this.modelSizes = {};
         this.modelVolumes = {};
+        this.cargoInertiaScale = 3;
+        this.cargoAngularDamping = 1.2;
+        this.collisionPartsCache = new Map();
     }
     
     applyCcdSettings(body, boxSize) {
@@ -83,15 +86,46 @@ class ItemManager {
         body._ccdConfigured = true;
     }
 
-    configurePlacedPhysicsBody(body, boxSize, worldPosition) {
+    configurePlacedPhysicsBody(body, boxSize) {
         if (!body) return;
-        // Havok derives the box inertia from its dimensions and mass. World-space
-        // damping stays low so it cannot drag cargo backwards off a moving bed.
+        // Resist quick tipping without inflating payload mass or locking rotation.
+        const massProperties = body.getMassProperties();
+        body.setMassProperties({ ...massProperties, inertia: massProperties.inertia.scale(this.cargoInertiaScale) });
+        // Keep translation damping low so cargo is not dragged off a moving bed.
         body.setLinearDamping(0.03);
-        body.setAngularDamping(0.12);
-        body.setLinearVelocity(this.truck.getPointVelocity(worldPosition));
+        body.setAngularDamping(this.cargoAngularDamping);
+        body.setLinearVelocity(this.truck.getPointVelocity(PhysicsSystem.centerOfMass(body.transformNode)));
         body.setAngularVelocity(this.truck._truckAngularVelocity || BABYLON.Vector3.Zero());
         this.applyCcdSettings(body, boxSize);
+    }
+
+    createCargoShape(mesh, itemDef, boxSize, modelMeshes) {
+        const key = [itemDef.type, boxSize.x, boxSize.y, boxSize.z].join(':');
+        let parts;
+        if (modelMeshes?.length) {
+            if (!this.collisionPartsCache.has(key)) {
+                this.collisionPartsCache.set(key, PhysicsSystem.modelCollisionParts(mesh, modelMeshes));
+            }
+            parts = this.collisionPartsCache.get(key);
+        }
+        if (!parts?.length) {
+            const half = new BABYLON.Vector3(boxSize.x, boxSize.y, boxSize.z).scale(0.5);
+            parts = [{ min: half.scale(-1), max: half }];
+        }
+        mesh.collisionParts = parts;
+        const shape = new BABYLON.PhysicsShapeContainer(this.scene);
+        mesh.collisionShapes = parts.map(part => {
+            const child = new BABYLON.PhysicsShapeBox(part.min.add(part.max).scale(0.5),
+                BABYLON.Quaternion.Identity(), part.max.subtract(part.min), this.scene);
+            if (child.setMargin) child.setMargin(0.002);
+            shape.addChild(child);
+            return child;
+        });
+        mesh.onDisposeObservable.add(() => {
+            shape.dispose();
+            for (const child of mesh.collisionShapes) child.dispose();
+        });
+        return shape;
     }
 
     _worldToTruckLocalXZ(worldX, worldZ) {
@@ -974,7 +1008,7 @@ class ItemManager {
             mesh.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(placeRotation, 0, 0);
 
             // Attach 3D model if available
-            this.attachModelIfAvailable(mesh, itemDef, { boxSize });
+            const modelMeshes = this.attachModelIfAvailable(mesh, itemDef, { boxSize });
 
             mesh.receiveShadows = true;
             mesh.isPickable = true;
@@ -983,7 +1017,7 @@ class ItemManager {
             // Create the physics body right away so placement matches the preview
             const aggregate = new BABYLON.PhysicsAggregate(
                 mesh,
-                BABYLON.PhysicsShapeType.BOX,
+                this.createCargoShape(mesh, itemDef, boxSize, modelMeshes),
                 {
                     mass: Math.max(1, itemDef.weight || 10),
                     restitution: 0.0,
@@ -994,12 +1028,8 @@ class ItemManager {
             );
             mesh.physicsAggregate = aggregate;
 
-            if (aggregate.shape && aggregate.shape.setMargin) {
-                aggregate.shape.setMargin(0.01);
-            }
-
             if (aggregate.body) {
-                this.configurePlacedPhysicsBody(aggregate.body, boxSize, mesh.position);
+                this.configurePlacedPhysicsBody(aggregate.body, boxSize);
             }
 
             console.log(`📦 PLACED ITEM ${itemDef.id} (PHYSICS): World=(${placeX.toFixed(2)}, ${placeY.toFixed(2)}, ${placeZ.toFixed(2)})`);

@@ -43,16 +43,22 @@ In another terminal, from repo root:
 ```bash
 node --test tests/house-streaming.mjs
 node tests/physics-browser.mjs
+node tests/cargo-contact-browser.mjs
 for f in scripts/*.js; do node --check "$f"; done
 git diff --check
 ```
 
 The suite checks parked and moving placement, acceleration/coasting/braking,
-payload effects, steering response through 65 mph, same-frame camera tracking, collisions, tipping, stacking,
+payload effects, steering response through 90 mph, same-frame camera tracking, collisions, tipping, stacking,
 pause/restart, physics off, delivery completion, and the actual loading/keyboard/mobile UI. It compares
 30/60/144 FPS simulation results and saves metrics/screenshots in `output/physics/`.
 Set `GAME_URL` for another local server and `PLAYWRIGHT_MODULE` when using an
 existing Playwright installation outside the repository.
+The contact suite checks open furniture gaps, tabletop versus foot contact,
+equal-mass sliding, airborne exclusion, and partial contact at the bed edge;
+it saves metrics and a support screenshot in `output/contact/`.
+It also checks broad-contact cargo through left/right turns at 35/65/90 mph
+and verifies that a sideways impact can still move it during a turn.
 The dependency-free house-streaming tests check idle budgets, busy-frame deferral,
 timeout/fallback progress, and disabled or stale work.
 
@@ -155,19 +161,33 @@ The player-controlled truck with:
 - Gear-dependent acceleration, payload mass, rolling resistance, and air drag
 - Responsive truck controls: up to 12 mph/s acceleration and 40 mph/s braking unloaded
 - Steering stays responsive while braking; cargo uses physical sliding/tumbling contacts
-- Collision detection with buildings/walls and suspension weight transfer
+- Level-footprint building/wall collisions allow backing away after impact;
+  suspension lean remains active for the visuals and cargo
 
 **Cargo System:**
 - Cargo bed bounds tracking
 - Loaded items management
 - By default, dynamic Havok bodies handle friction, stacking, sliding,
   tipping, and impacts without pose locks or per-frame velocity clamps
-- Simplified box collision shapes remain; the truck follows a road-plane
-  vehicle model rather than a full wheel/suspension rigid-body simulation
+- Contact-gated lateral grip reduces excessive sideways motion from arcade
+  steering, including supported stacks, without assisting airborne cargo
+- Increased rotational inertia and angular damping give cargo a heavier feel:
+  small knocks settle quickly, while hard impacts can still tip unsecured items.
+  Payload weights, linear damping, and the truck controls are unchanged.
+- Chairs and tables use compound collision shapes around the model's individual
+  wooden parts, leaving space between legs and backrest rails open. Other items
+  use box shapes matching their visible fallback geometry.
+- As a gameplay rule, more floor-contact area means more friction. Grip uses
+  downward-facing part surfaces clipped to the bed, not the whole footprint;
+  feet and edges grip less than a broad flat face. Grip is capped, not a lock.
+- Turn grip compensates for the moving bed's next-step velocity most strongly
+  on broad contact surfaces, reducing sideways drift without changing braking.
+- The truck follows a road-plane vehicle model rather than a full
+  wheel/suspension rigid-body simulation.
 
 **Key Constants:**
 ```javascript
-maxSpeed: 65          // Governed road speed in MPH
+maxSpeed: 90          // Governed road speed in MPH
 maxReverseSpeed: 12   // Reverse limit in MPH
 truckBaseMass: 3500   // Unladen mass in kg
 wheelbase: 4.8        // Meters between axles

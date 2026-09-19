@@ -135,18 +135,14 @@ try {
             advance(1, { w: true, a: true }, fps);
             result.frameRates.push({ fps, speed: truck.speed, x: truck.position.x, z: truck.position.z, cargo: sample(chair) });
         }
-        const floorShape = truck.truckPhysicsAggregates[0].aggregate.shape;
-        const bedMaterial = { ...floorShape.material };
+        const lateralGrip = truck.cargoLateralGrip;
         result.turnGrip = [];
         for (const type of ['box', 'chair', 'table']) {
             for (const key of ['a', 'd']) {
                 const turns = {};
                 for (const legacy of [true, false]) {
                     reset();
-                    floorShape.material = legacy ? {
-                        friction: 0.85, staticFriction: 0.85, restitution: 0,
-                        frictionCombine: BABYLON.PhysicsMaterialCombineMode.MINIMUM
-                    } : bedMaterial;
+                    truck.cargoLateralGrip = legacy ? 0 : lateralGrip;
                     const item = place(type);
                     advance(1);
                     advance(2, { w: true });
@@ -164,7 +160,100 @@ try {
                 result.turnGrip.push({ type, key, ...turns });
             }
         }
-        floorShape.material = bedMaterial;
+        truck.cargoLateralGrip = lateralGrip;
+        result.sustainedTurns = [];
+        for (const mph of [35, 65, 90]) {
+            for (const key of ['a', 'd']) {
+                const states = {};
+                for (const assisted of [false, true]) {
+                    reset();
+                    truck.cargoLateralGrip = assisted ? lateralGrip : 0;
+                    truck.speed = -mph;
+                    advance(0.1);
+                    const item = place('chair');
+                    advance(1);
+                    const start = sample(item);
+                    advance(1, { [key]: true });
+                    states[assisted ? 'after' : 'before'] = {
+                        travel: Math.hypot(item.localX - start.x, item.localZ - start.z), fallen: item.isFallen
+                    };
+                }
+                result.sustainedTurns.push({ mph, key, ...states });
+            }
+        }
+        truck.cargoLateralGrip = lateralGrip;
+        result.heavyCargo = [];
+        const inertiaScale = manager.cargoInertiaScale;
+        const angularDamping = manager.cargoAngularDamping;
+        for (const legacy of [true, false]) {
+            reset();
+            manager.cargoInertiaScale = legacy ? 1 : inertiaScale;
+            manager.cargoAngularDamping = legacy ? 0.12 : angularDamping;
+            const item = place('chair');
+            advance(1);
+            const body = item.mesh.physicsAggregate.body;
+            body.applyImpulse(new BABYLON.Vector3(4, 0, 0), item.mesh.position.add(new BABYLON.Vector3(0, 0.45, 0)));
+            const angularSpeed = body.getAngularVelocity().length();
+            const samples = advance(0.5, {}, 60, item);
+            result.heavyCargo.push({ legacy, mass: body.getMassProperties().mass, angularSpeed,
+                maxTilt: Math.max(...samples.map(s => s.tilt)), fallen: item.isFallen });
+        }
+        manager.cargoInertiaScale = inertiaScale;
+        manager.cargoAngularDamping = angularDamping;
+        reset();
+        truck.speed = -35;
+        advance(0.1);
+        chair = place();
+        advance(1);
+        const uprightStart = sample(chair);
+        const uprightBrake = advance(2, { space: true }, 60, chair);
+        result.uprightBraking = {
+            travel: Math.max(...uprightBrake.map(s => Math.hypot(s.x - uprightStart.x, s.z - uprightStart.z))),
+            maxTilt: Math.max(...uprightBrake.map(s => s.tilt)), fallen: chair.isFallen
+        };
+        result.cargoIsolation = {};
+        for (const assisted of [false, true]) {
+            reset();
+            truck.cargoLateralGrip = assisted ? lateralGrip : 0;
+            chair = place();
+            advance(3);
+            advance(6, { w: true });
+            const accelerated = sample(chair);
+            advance(2);
+            advance(3, { space: true });
+            result.cargoIsolation[assisted ? 'assisted' : 'unassisted'] = {
+                accelerated, braked: sample(chair), z: truck.position.z
+            };
+        }
+        result.airborne = [];
+        result.stackTurn = [];
+        for (const assisted of [false, true]) {
+            reset();
+            truck.cargoLateralGrip = assisted ? lateralGrip : 0;
+            const bottom = place('box');
+            const top = place('box');
+            advance(1);
+            advance(2, { w: true });
+            let impulses = 0;
+            const topBody = top.mesh.physicsAggregate.body;
+            const apply = topBody.applyImpulse.bind(topBody);
+            topBody.applyImpulse = (...args) => { impulses++; return apply(...args); };
+            advance(0.4, { a: true });
+            result.stackTurn.push({ assisted, impulses, bottom: sample(bottom), top: sample(top) });
+
+            reset();
+            const airborne = place('box');
+            advance(1);
+            advance(2, { w: true });
+            const body = airborne.mesh.physicsAggregate.body;
+            body.applyImpulse(new BABYLON.Vector3(0, body.getMassProperties().mass * 8, 0), airborne.mesh.position);
+            let airImpulses = 0;
+            const applyAir = body.applyImpulse.bind(body);
+            body.applyImpulse = (...args) => { airImpulses++; return applyAir(...args); };
+            advance(0.2, { a: true });
+            result.airborne.push({ assisted, impulses: airImpulses, position: airborne.mesh.position.asArray(), velocity: body.getLinearVelocity().asArray() });
+        }
+        truck.cargoLateralGrip = lateralGrip;
         result.steering = [];
         for (const reverse of [false, true]) {
             for (const key of ['a', 'd']) {
@@ -217,7 +306,7 @@ try {
         advance(1, { a: true });
         result.cornering = { yawRate: Math.abs(truck.turnRate), yaw: Math.abs(truck.rotation) };
         result.roadSpeedTurning = [];
-        for (const mph of [25, 45, 65]) {
+        for (const mph of [25, 45, 65, 90]) {
             for (const key of ['a', 'd']) {
                 reset();
                 truck.speed = -mph;
@@ -255,8 +344,93 @@ try {
         game.sceneManager.destinationWalls = [obstacle];
         advance(5, { w: true }, 60, chair);
         result.collision = { speed: truck.speed, z: truck.position.z, velocity: truck.getPointVelocity(truck.position).length() };
+        advance(1, { s: true });
+        result.collision.reverseDistance = truck.position.z - result.collision.z;
+        result.collision.reverseSpeed = truck.speed;
         obstacle.dispose();
         game.sceneManager.destinationWalls = [];
+        result.houseRecovery = [];
+        for (const scenario of [
+            { yaw: 0, houseYaw: 0, reverse: false, speed: 35 },
+            { yaw: 0.7, houseYaw: 0.35, reverse: false, speed: 90 },
+            { yaw: -1.2, houseYaw: 0, reverse: true, speed: 12 },
+            { yaw: 0.4, houseYaw: -0.3, reverse: false, speed: 45, steering: true },
+            { yaw: 0, houseYaw: 0, reverse: false, speed: 90, pickup: true }
+        ]) {
+            reset();
+            truck.checkMeshCollision = originalCheck;
+            truck.rotation = scenario.yaw;
+            truck.applyTransform(true);
+            const direction = new BABYLON.Vector3(Math.sin(scenario.yaw), 0, Math.cos(scenario.yaw)).scale(scenario.reverse ? 1 : -1);
+            const house = BABYLON.MeshBuilder.CreateBox('recoveryHouse', { width: 12, height: 5, depth: 12 }, game.scene);
+            house.position.copyFrom(direction.scale(20));
+            house.position.y = 2.5;
+            house.rotation.y = scenario.yaw + scenario.houseYaw;
+            // Intentionally no render/matrix update: freshly streamed houses must block too.
+            if (scenario.pickup) game.sceneManager.pickupHouse = house;
+            else game.sceneManager.housesByTile = { '0_0': [house] };
+            truck.speed = scenario.reverse ? scenario.speed : -scenario.speed;
+            const into = scenario.reverse ? 's' : 'w';
+            const away = scenario.reverse ? 'w' : 's';
+            advance(3, { [into]: true });
+            const impact = truck.position.clone();
+            const stopped = truck.speed === 0;
+            advance(1, { [into]: true });
+            const pushing = BABYLON.Vector3.Distance(impact, truck.position);
+            advance(1, { [away]: true, a: !!scenario.steering });
+            result.houseRecovery.push({ ...scenario, stopped, pushing,
+                approach: BABYLON.Vector3.Dot(impact, direction),
+                escape: -BABYLON.Vector3.Dot(truck.position.subtract(impact), direction), speed: truck.speed });
+            house.dispose();
+            game.sceneManager.housesByTile = {};
+            game.sceneManager.pickupHouse = null;
+        }
+        result.overlapRecovery = [];
+        const blocksMovement = truck.blocksTruckMovement;
+        for (const kind of ['house', 'pickup', 'wall']) for (const reverse of [false, true])
+            for (const yaw of [0, 0.7]) for (const legacy of [true, false]) {
+            reset();
+            truck.checkMeshCollision = originalCheck;
+            truck.blocksTruckMovement = legacy ? (mesh, obstacle) => mesh.intersectsMesh(obstacle, true) : blocksMovement;
+            truck.rotation = yaw;
+            truck.applyTransform(true);
+            const direction = new BABYLON.Vector3(Math.sin(yaw), 0, Math.cos(yaw)).scale(reverse ? 1 : -1);
+            const wall = BABYLON.MeshBuilder.CreateBox('overlapObstacle', { width: 12, height: 5, depth: 2 }, game.scene);
+            wall.position.copyFrom(direction.scale(10));
+            wall.position.y = 2.5;
+            wall.rotation.y = yaw;
+            if (kind === 'house') game.sceneManager.housesByTile = { '0_0': [wall] };
+            else if (kind === 'pickup') game.sceneManager.pickupHouse = wall;
+            else game.sceneManager.destinationWalls = [wall];
+            advance(4, { [reverse ? 's' : 'w']: true });
+            // Reproduce a streamed/moved obstacle penetrating an already stopped truck.
+            wall.position.subtractInPlace(direction.scale(0.08));
+            wall.computeWorldMatrix(true);
+            truck._collisionCache = null;
+            const start = truck.position.clone();
+            const blockedAtRest = originalCheck(start.x, start.z, truck.rotation);
+            advance(0.5, { [reverse ? 's' : 'w']: true });
+            const pushing = BABYLON.Vector3.Distance(start, truck.position);
+            if (!legacy && kind === 'house' && !reverse && yaw === 0) {
+                const rear = Math.max(...truck.collisionMeshes.map(mesh => mesh.getBoundingInfo().boundingBox.maximumWorld.z));
+                const other = BABYLON.MeshBuilder.CreateBox('escapeBlocker', { width: 12, height: 5, depth: 0.1 }, game.scene);
+                other.position.set(0, 2.5, rear + 0.055);
+                game.sceneManager.destinationWalls = [other];
+                truck._collisionCache = null;
+                result.escapeIntoOtherBlocked = originalCheck(start.x, start.z + 0.02, yaw);
+                other.dispose();
+                game.sceneManager.destinationWalls = [];
+                truck._collisionCache = null;
+            }
+            advance(1, { [reverse ? 'w' : 's']: true });
+            result.overlapRecovery.push({ kind, reverse, yaw, legacy, blockedAtRest, pushing,
+                escape: -BABYLON.Vector3.Dot(truck.position.subtract(start), direction) });
+            wall.dispose();
+            game.sceneManager.housesByTile = {};
+            game.sceneManager.pickupHouse = null;
+            game.sceneManager.destinationWalls = [];
+        }
+        truck.blocksTruckMovement = blocksMovement;
         reset();
         chair = place();
         advance(1);
@@ -312,6 +486,13 @@ try {
     });
     await fs.writeFile(path.join(output, 'metrics.json'), JSON.stringify(metrics, null, 2));
     await page.screenshot({ path: path.join(output, 'desktop.png') });
+    await page.evaluate(() => {
+        window.advanceTime(0);
+        game.truck.keys.a = true;
+        window.advanceTime(400);
+        game.truck.resetDrivingKeys();
+    });
+    await page.screenshot({ path: path.join(output, 'cargo-turn.png') });
     console.log(JSON.stringify(metrics, null, 2));
     assert.equal(errors.length, 0, errors.join('\n'));
     for (const turn of metrics.roadSpeedTurning) {
@@ -320,26 +501,68 @@ try {
         assert(turn.yaw * sign > 1.35 && turn.yaw * sign < 1.5, JSON.stringify(turn));
     }
     for (const turn of metrics.turnGrip) {
-        assert(turn.after.travel < turn.before.travel * 0.9, JSON.stringify(turn));
-        assert(turn.after.travel > 0.1, 'Hard turns must still move unsecured cargo');
+        assert(turn.after.travel < turn.before.travel * 0.3, JSON.stringify(turn));
+        // Static friction may hold a short turn; impact tests verify free motion.
         assert(turn.after.dynamic && !turn.after.fallen, JSON.stringify(turn));
         assert(Math.abs(turn.after.speed - turn.before.speed) < 0.001);
         assert(Math.abs(turn.after.yaw - turn.before.yaw) < 0.001);
     }
+    assert.equal(metrics.cargoIsolation.assisted.z, metrics.cargoIsolation.unassisted.z);
+    for (const phase of ['accelerated', 'braked']) {
+        const before = metrics.cargoIsolation.unassisted[phase];
+        const after = metrics.cargoIsolation.assisted[phase];
+        for (const field of ['x', 'y', 'z', 'tilt', 'vy']) {
+            assert(Math.abs(before[field] - after[field]) < 0.0001, 'Turn grip must not affect straight-line cargo motion');
+        }
+        assert.equal(after.fallen, before.fallen);
+    }
+    const [light, heavy] = metrics.heavyCargo;
+    assert.equal(heavy.mass, light.mass, 'Cargo feel must not change payload mass');
+    assert(heavy.angularSpeed < light.angularSpeed * 0.4, JSON.stringify(metrics.heavyCargo));
+    assert(heavy.maxTilt < light.maxTilt * 0.6 && !heavy.fallen, JSON.stringify(metrics.heavyCargo));
+    for (const turn of metrics.sustainedTurns) {
+        assert(turn.after.travel < turn.before.travel * 0.2 && !turn.after.fallen, JSON.stringify(turn));
+    }
+    for (const mph of [35, 65, 90]) {
+        const [left, right] = metrics.sustainedTurns.filter(turn => turn.mph === mph);
+        assert(Math.abs(left.after.travel - right.after.travel) < 0.02, 'Left/right cargo grip should be symmetric');
+    }
+    assert.equal(metrics.airborne[1].impulses, 0, 'Airborne cargo must not receive turn assistance');
+    for (const field of ['position', 'velocity']) {
+        metrics.airborne[1][field].forEach((value, index) => assert(Math.abs(value - metrics.airborne[0][field][index]) < 1e-6));
+    }
+    assert(metrics.stackTurn[1].impulses > 0, 'Supported stacks should receive lateral grip');
+    assert(Math.abs(metrics.stackTurn[1].top.x) < Math.abs(metrics.stackTurn[0].top.x) * 0.5);
+    for (const recovery of metrics.houseRecovery) {
+        assert(recovery.stopped && recovery.pushing < 0.001, JSON.stringify(recovery));
+        assert(recovery.approach > 5 && recovery.approach < 15, JSON.stringify(recovery));
+        if (recovery.houseYaw === 0) {
+            const expectedContact = recovery.reverse ? 11.6 : 9.6;
+            assert(Math.abs(recovery.approach - expectedContact) < 0.4, JSON.stringify(recovery));
+        }
+        assert(recovery.escape > 1 && Math.abs(recovery.speed) > 5, JSON.stringify(recovery));
+    }
+    for (const recovery of metrics.overlapRecovery) {
+        assert(recovery.blockedAtRest && recovery.pushing < 0.001, JSON.stringify(recovery));
+        assert(recovery.legacy ? Math.abs(recovery.escape) < 0.001 : recovery.escape > 1, JSON.stringify(recovery));
+    }
+    assert(metrics.escapeIntoOtherBlocked, 'Escaping one obstacle must not enter another');
     assert(metrics.idle.dynamic);
     assert(metrics.idle.travel < 0.05);
     assert(metrics.idle.maxTilt < 3);
     assert(metrics.idle.bounce < 0.03);
     assert(metrics.acceleration.mph > 40 && metrics.acceleration.mph < 55);
     assert(metrics.acceleration.pitch > 0); // Nose rises under throttle.
-    assert(metrics.acceleration.slide > 0.2 && metrics.acceleration.slide < 1);
-    assert(metrics.acceleration.maxTilt > 45); // Unsecured tall cargo can tip under hard throttle.
+    assert(metrics.acceleration.slide < 0.05);
+    assert(metrics.acceleration.maxTilt < 5); // Real feet/seat mass distribution supports normal acceleration.
     assert(metrics.acceleration.maxUpwardSpeed < 2);
     assert(!metrics.acceleration.fallen);
     assert(metrics.coasting.afterMph > metrics.coasting.beforeMph * 0.85);
     assert(metrics.braking.stopped);
     assert(metrics.braking.distance > 2 && metrics.braking.distance < 15);
-    assert(metrics.braking.cargoTravel > 0.2);
+    assert(metrics.braking.cargoTravel > 0.2 && metrics.braking.cargoTravel < 2.5);
+    assert(metrics.uprightBraking.travel > 0.05 && metrics.uprightBraking.maxTilt > 20 && !metrics.uprightBraking.fallen,
+        JSON.stringify(metrics.uprightBraking));
     assert(metrics.braking.maxUpwardSpeed < 3);
     assert(metrics.braking.maxTilt > 45);
     assert(!metrics.braking.fallen);
@@ -349,7 +572,7 @@ try {
     assert(metrics.payload.loadedSpeed < metrics.payload.emptySpeed * 0.85);
     const baseline = metrics.frameRates[0];
     assert(!baseline.cargo.fallen);
-    assert(Math.abs(baseline.cargo.x) > 0.3 && Math.abs(baseline.cargo.x) < 1.2);
+    assert(Math.abs(baseline.cargo.x) > 0.01 && Math.abs(baseline.cargo.x) < 0.5);
     for (const state of metrics.frameRates.slice(1)) {
         assert(Math.hypot(state.x - baseline.x, state.z - baseline.z) < 0.2);
         assert(Math.abs(state.speed - baseline.speed) < 0.1);
@@ -382,7 +605,7 @@ try {
         assert(Math.abs(camera.releasedOffset - metrics.cameraRates[0].releasedOffset) < 0.02);
     }
     assert(metrics.cameraHeadingErrors.every(error => error < 1e-6));
-    assert(metrics.highway.speed > 64 && metrics.highway.speed <= 65);
+    assert(metrics.highway.speed > 89 && metrics.highway.speed <= 90);
     assert.equal(metrics.highway.gear, 5);
     assert.equal(metrics.pause.truck, 0);
     assert.equal(metrics.pause.cargo, 0);
@@ -392,6 +615,7 @@ try {
     assert.equal(metrics.collision.speed, 0);
     assert.equal(metrics.collision.velocity, 0);
     assert(metrics.collision.z > -12);
+    assert(metrics.collision.reverseDistance > 1 && metrics.collision.reverseSpeed > 5, JSON.stringify(metrics.collision));
     assert(metrics.tipping.maxTilt > 45 && !metrics.tipping.fallen);
     assert(!metrics.stack.chair.fallen && !metrics.stack.box.fallen);
     assert(!metrics.table.fallen && metrics.table.tilt < 5);
